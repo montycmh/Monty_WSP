@@ -302,7 +302,7 @@ const rows = wb.rows;
 const quarterHeader = String(rows[0][5] || rows[0][9] || rows[0][13] || '').trim();
 const monthLabels = [String(rows[1][5]||'').trim(), String(rows[1][9]||'').trim(), String(rows[1][13]||'').trim()];
 const fcstRaw = [rows[2][3], rows[2][7], rows[2][11], rows[2][15]].map(x => String(x||'')).find(x => /forecast|fcst/i.test(x)) || 'Forecast';
-const forecastLabel = fcstRaw.replace(/Forecast/i,'FCST').replace(/\s+/g,' ').trim();
+const forecastLabel = fcstRaw.replace(/\bFCST\b/ig,'Forecast').replace(/\s+/g,' ').trim();
 const dataRows = [];
 for(let i=3;i<rows.length;i++){
 const label = String(rows[i][0] || '').trim();
@@ -708,8 +708,8 @@ ${blocks.map(b => renderDriverBlock(b)).join('') || '<div class="comment-block">
 }
 function renderQuarterTable(rows, benchmarkKey, monthLabels, totalRow, sectionId){
 const drill = sectionId === 'sec-qplan' || sectionId === 'sec-qfcst';
-let h = '<table><thead><tr><th>Category</th><th class="yw tot-col">Q Working</th><th class="tot-col">' + (benchmarkKey==='p'?'Q Plan':'Q FCST') + '</th><th class="yv tot-col tot-end">Q Var</th>';
-monthLabels.forEach((m, idx) => { const rv = idx===REVIEW_MONTH_IDX; h += `<th class="yw${rv?' rev-col rev-start':''}">${escapeHtml(m)} W</th><th class="${rv?'rev-col':''}">${escapeHtml(m)} ${benchmarkKey==='p'?'P':'F'}</th><th class="mv${rv?' rev-col rev-end':''}">Var</th>`; });
+let h = '<table><thead><tr><th>Category</th><th class="yw tot-col">Quarter Working</th><th class="tot-col">' + (benchmarkKey==='p'?'Quarter Plan':'Quarter Forecast') + '</th><th class="yv tot-col tot-end">Variance (Working vs ' + (benchmarkKey==='p'?'Plan':'Forecast') + ')</th>';
+monthLabels.forEach((m, idx) => { const rv = idx===REVIEW_MONTH_IDX; h += `<th class="yw${rv?' rev-col rev-start':''}">${escapeHtml(m)} Working</th><th class="${rv?'rev-col':''}">${escapeHtml(m)} ${benchmarkKey==='p'?'Plan':'Forecast'}</th><th class="mv${rv?' rev-col rev-end':''}">Variance (Working vs ${benchmarkKey==='p'?'Plan':'Forecast'})</th>`; });
 h += '</tr></thead><tbody>';
 const totalRows = totalRow ? [{ ...totalRow, label: totalRow.label || 'Expense', rowType: 'expense' }] : [];
 const orderedRows = rows.filter(r => r.rowType !== 'expense').concat(totalRows);
@@ -737,8 +737,8 @@ return h;
 }
 function renderYearTable(rows, benchmarkKey, totalRow, sectionId){
 const drill = sectionId === 'sec-fyplan' || sectionId === 'sec-fyfcst';
-let h = '<table><thead><tr><th>Category</th><th class="yw tot-col">FY Working</th><th class="tot-col">' + (benchmarkKey==='p'?'FY Plan':'FY FCST') + '</th><th class="yv tot-col tot-end">FY Var</th>';
-['Q1','Q2','Q3','Q4'].forEach((q, idx) => { const rv = idx===REVIEW_Q_IDX; h += `<th class="yw${rv?' rev-col rev-start':''}">${q} W</th><th class="${rv?'rev-col':''}">${q} ${benchmarkKey==='p'?'P':'F'}</th><th class="mv${rv?' rev-col rev-end':''}">Var</th>`; });
+let h = '<table><thead><tr><th>Category</th><th class="yw tot-col">Full Year Working</th><th class="tot-col">' + (benchmarkKey==='p'?'Full Year Plan':'Full Year Forecast') + '</th><th class="yv tot-col tot-end">Variance (Working vs ' + (benchmarkKey==='p'?'Plan':'Forecast') + ')</th>';
+['Q1','Q2','Q3','Q4'].forEach((q, idx) => { const rv = idx===REVIEW_Q_IDX; h += `<th class="yw${rv?' rev-col rev-start':''}">${q} Working</th><th class="${rv?'rev-col':''}">${q} ${benchmarkKey==='p'?'Plan':'Forecast'}</th><th class="mv${rv?' rev-col rev-end':''}">Variance (Working vs ${benchmarkKey==='p'?'Plan':'Forecast'})</th>`; });
 h += '</tr></thead><tbody>';
 const totalRows = totalRow ? [{ ...totalRow, label: totalRow.label || 'Expense', rowType: 'expense' }] : [];
 const orderedRows = rows.filter(r => r.rowType !== 'expense').concat(totalRows);
@@ -771,7 +771,7 @@ return `<div class="drv-block ${block.variance < 0 ? 'fav-block':'unfav-block'}"
 <button class="del-block" data-del-block="blk-${block.id}"><i class="ti ti-trash"></i></button>
 <div class="drv-label">${escapeHtml(cleanLabel(block.label))}</div>
 <div class="drv-amt ${block.variance<0?'drv-fav':'drv-unfav'}">${fmtK(block.variance)}</div>
-<div class="drv-benchmark">Working vs ${block.benchmarkKey==='p'?'Plan':'FCST'}</div>
+<div class="drv-benchmark">Working vs ${block.benchmarkKey==='p'?'Plan':'Forecast'}</div>
 <div class="drv-badge-wrap">${varianceBadge(block.variance)}</div>
 </div>
 <div class="drv-right">
@@ -840,7 +840,7 @@ return `<section class="sec" id="sec-hc">
 </div>
 </div>
 <div class="sublbl">HC movement</div>
-<div class="tbl-wrap hc-move-wrap"><table class="hc-move-table"><thead><tr><th>Metric</th><th class="yw">Plan</th><th class="te-q2">Working</th><th class="yv">Var</th></tr></thead><tbody>
+<div class="tbl-wrap hc-move-wrap"><table class="hc-move-table"><thead><tr><th>Metric</th><th class="yw">Plan</th><th class="te-q2">Working</th><th class="yv">Variance (Working vs Plan)</th></tr></thead><tbody>
 ${hcRow('Active Employees', m.activePlan, m.activeWork)}
 ${hcRow('TBH Roles', m.tbhPlan, m.tbhWork)}
 ${hcRow('New Hires (not in plan)', 0, m.newHires)}
@@ -1941,7 +1941,7 @@ return o;
 }
 function close(){ var o=document.getElementById('drill-overlay'); var p=document.getElementById('drill-panel'); if(p)p.classList.remove('show'); if(o)o.classList.remove('show'); }
 function open(cell){
-var rowIndex=Number(cell.dataset.rowIndex), scope=cell.dataset.scope||'q', bk=cell.dataset.benchmark, bl=bk==='p'?'Plan':'FCST', vendors, threshold;
+var rowIndex=Number(cell.dataset.rowIndex), scope=cell.dataset.scope||'q', bk=cell.dataset.benchmark, bl=bk==='p'?'Plan':'Forecast', vendors, threshold;
 if(scope==='y'){ var py=cell.dataset.period==='fy'?'fy':Number(cell.dataset.period); vendors=computeY(rowIndex,py,bk); threshold=75; }
 else { var pq=cell.dataset.period==='q'?'q':Number(cell.dataset.period); vendors=computeQ(rowIndex,pq,bk); threshold=25; }
 render({title:cell.dataset.label, periodLabel:cell.dataset.periodLabel, benchmarkLabel:bl, vendors:vendors, threshold:threshold});
@@ -2041,7 +2041,7 @@ function openDrill(cell){
 const rowIndex = Number(cell.dataset.rowIndex);
 const scope = cell.dataset.scope || 'q';
 const benchmarkKey = cell.dataset.benchmark;
-const benchmarkLabel = benchmarkKey === 'p' ? 'Plan' : 'FCST';
+const benchmarkLabel = benchmarkKey === 'p' ? 'Plan' : 'Forecast';
 let vendors, threshold;
 if(scope === 'y'){
 const period = cell.dataset.period === 'fy' ? 'fy' : Number(cell.dataset.period);
