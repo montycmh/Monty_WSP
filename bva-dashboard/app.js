@@ -706,10 +706,29 @@ ${blocks.map(b => renderDriverBlock(b)).join('') || '<div class="comment-block">
 <script type="application/json" id="${id}-wf-data">${JSON.stringify({labels, baseStart, vars, workingEnd})}</script>
 </section>`;
 }
+function stackedHeader(top, bottom, extraClass=''){
+return `<th class="stacked-th ${extraClass}">
+<span class="th-top">${escapeHtml(top)}</span>
+${bottom ? `<span class="th-bottom">${escapeHtml(bottom)}</span>` : ''}
+</th>`;
+}
 function renderQuarterTable(rows, benchmarkKey, monthLabels, totalRow, sectionId){
 const drill = sectionId === 'sec-qplan' || sectionId === 'sec-qfcst';
-let h = '<table><thead><tr><th>Category</th><th class="yw tot-col">Quarter Working</th><th class="tot-col">' + (benchmarkKey==='p'?'Quarter Plan':'Quarter Forecast') + '</th><th class="yv tot-col tot-end">Variance (Working vs ' + (benchmarkKey==='p'?'Plan':'Forecast') + ')</th>';
-monthLabels.forEach((m, idx) => { const rv = idx===REVIEW_MONTH_IDX; h += `<th class="yw${rv?' rev-col rev-start':''}">${escapeHtml(m)} Working</th><th class="${rv?'rev-col':''}">${escapeHtml(m)} ${benchmarkKey==='p'?'Plan':'Forecast'}</th><th class="mv${rv?' rev-col rev-end':''}">Variance (Working vs ${benchmarkKey==='p'?'Plan':'Forecast'})</th>`; });
+const benchmarkName = benchmarkKey === 'p' ? 'Plan' : 'Forecast';
+const varianceName = `Working vs ${benchmarkName}`;
+let h = '<table><thead><tr><th>Category</th>' +
+stackedHeader('Quarter', 'Working', 'yw tot-col') +
+stackedHeader('Quarter', benchmarkName, 'tot-col') +
+stackedHeader('Variance', varianceName, 'yv tot-col tot-end variance-header');
+monthLabels.forEach((m, idx) => {
+const rv = idx===REVIEW_MONTH_IDX;
+const reviewWorkingClass = `yw${rv?' rev-col rev-start':''}`;
+const reviewBenchmarkClass = `${rv?'rev-col':''}`;
+const reviewVarianceClass = `mv${rv?' rev-col rev-end':''} variance-header`;
+h += stackedHeader(m, 'Working', reviewWorkingClass) +
+stackedHeader(m, benchmarkName, reviewBenchmarkClass) +
+stackedHeader('Variance', varianceName, reviewVarianceClass);
+});
 h += '</tr></thead><tbody>';
 const totalRows = totalRow ? [{ ...totalRow, label: totalRow.label || 'Expense', rowType: 'expense' }] : [];
 const orderedRows = rows.filter(r => r.rowType !== 'expense').concat(totalRows);
@@ -735,10 +754,24 @@ h += '</tr>';
 h += '</tbody></table>';
 return h;
 }
+
 function renderYearTable(rows, benchmarkKey, totalRow, sectionId){
 const drill = sectionId === 'sec-fyplan' || sectionId === 'sec-fyfcst';
-let h = '<table><thead><tr><th>Category</th><th class="yw tot-col">Full Year Working</th><th class="tot-col">' + (benchmarkKey==='p'?'Full Year Plan':'Full Year Forecast') + '</th><th class="yv tot-col tot-end">Variance (Working vs ' + (benchmarkKey==='p'?'Plan':'Forecast') + ')</th>';
-['Q1','Q2','Q3','Q4'].forEach((q, idx) => { const rv = idx===REVIEW_Q_IDX; h += `<th class="yw${rv?' rev-col rev-start':''}">${q} Working</th><th class="${rv?'rev-col':''}">${q} ${benchmarkKey==='p'?'Plan':'Forecast'}</th><th class="mv${rv?' rev-col rev-end':''}">Variance (Working vs ${benchmarkKey==='p'?'Plan':'Forecast'})</th>`; });
+const benchmarkName = benchmarkKey === 'p' ? 'Plan' : 'Forecast';
+const varianceName = `Working vs ${benchmarkName}`;
+let h = '<table><thead><tr><th>Category</th>' +
+stackedHeader('Full Year', 'Working', 'yw tot-col') +
+stackedHeader('Full Year', benchmarkName, 'tot-col') +
+stackedHeader('Variance', varianceName, 'yv tot-col tot-end variance-header');
+['Q1','Q2','Q3','Q4'].forEach((q, idx) => {
+const rv = idx===REVIEW_Q_IDX;
+const reviewWorkingClass = `yw${rv?' rev-col rev-start':''}`;
+const reviewBenchmarkClass = `${rv?'rev-col':''}`;
+const reviewVarianceClass = `mv${rv?' rev-col rev-end':''} variance-header`;
+h += stackedHeader(q, 'Working', reviewWorkingClass) +
+stackedHeader(q, benchmarkName, reviewBenchmarkClass) +
+stackedHeader('Variance', varianceName, reviewVarianceClass);
+});
 h += '</tr></thead><tbody>';
 const totalRows = totalRow ? [{ ...totalRow, label: totalRow.label || 'Expense', rowType: 'expense' }] : [];
 const orderedRows = rows.filter(r => r.rowType !== 'expense').concat(totalRows);
@@ -764,6 +797,7 @@ h += '</tr>';
 h += '</tbody></table>';
 return h;
 }
+
 function renderDriverBlock(block){
 return `<div class="drv-block ${block.variance < 0 ? 'fav-block':'unfav-block'}" id="blk-${block.id}-wrap">
 <div class="drv-block-inner">
