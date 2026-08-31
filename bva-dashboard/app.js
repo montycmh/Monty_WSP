@@ -118,12 +118,6 @@ btn.addEventListener('click', () => setBoardCount(Number(btn.dataset.count)));
 });
 }
 renderBoardGroups();
-window.addEventListener('message', event => {
-const data = event.data || {};
-if(data.type !== 'bva-board-update' || !data.storageKey || !data.html) return;
-const board = state.generated.find(g => g.storageKey === data.storageKey);
-if(board) board.html = data.html;
-});
 document.getElementById('save-nav').addEventListener('click', saveState);
 document.getElementById('download-nav').addEventListener('click', downloadHtml);
 const pdfNav = document.getElementById('download-pdf-nav');
@@ -887,7 +881,6 @@ const text = input ? input.value.trim() : '';
 const rowId = slug(blockId + '-' + Date.now());
 const row = document.createElement('div');
 row.className = 'comment-row';
-row.dataset.dynamicComment = blockId;
 row.id = rowId + '-row';
 row.innerHTML = `<textarea class="vedit" rows="2" data-persist="comment:${rowId}">${escapeHtml(text)}</textarea><button class="del-btn" data-del-row="${rowId}"><i class="ti ti-trash"></i></button>`;
 const addWrap = input.closest('.inline-add');
@@ -920,49 +913,13 @@ const ctr = document.getElementById('actCtr');
 if(ctr) ctr.textContent = `${done} of ${items.length} completed`;
 }
 function autoResize(el){ if(!el || el.tagName !== 'TEXTAREA') return; el.style.height='auto'; el.style.height = el.scrollHeight + 'px'; }
-function collectDynamicRows(){
-return {
-comments: Array.from(document.querySelectorAll('.comment-row')).map(row => ({
-html: row.outerHTML,
-owner: row.dataset.dynamicComment || ''
-})),
-actions: Array.from(document.querySelectorAll('.act-item'))
-.filter(row => row.id && !/^act-\d+$/.test(row.id))
-.map(row => row.outerHTML)
-};
-}
-function restoreDynamicRows(dynamic){
-if(!dynamic) return;
-(dynamic.comments || []).forEach(item => {
-const html = typeof item === 'string' ? item : item.html;
-const owner = typeof item === 'string' ? '' : item.owner;
-if(!html) return;
-const holder = document.createElement('div');
-holder.innerHTML = html.trim();
-const row = holder.firstElementChild;
-if(!row || !row.id || document.getElementById(row.id)) return;
-const input = owner ? document.querySelector(`[data-add-input="${cssEscape(owner)}"]`) : null;
-if(input){
-const addWrap = input.closest('.inline-add');
-if(addWrap) addWrap.parentNode.insertBefore(row, addWrap);
-}
-});
-(dynamic.actions || []).forEach(html => {
-const holder = document.createElement('div');
-holder.innerHTML = String(html).trim();
-const row = holder.firstElementChild;
-const list = document.getElementById('actList');
-if(row && row.id && list && !document.getElementById(row.id)) list.appendChild(row);
-});
-}
 function saveState(){
 if(!state.model) return;
 const key = storageKey();
 const payload = {
 comments: {},
 actions: {},
-hidden: [],
-dynamic: collectDynamicRows()
+hidden: []
 };
 document.querySelectorAll('[data-persist]').forEach(el => payload.comments[el.dataset.persist] = el.value);
 document.querySelectorAll('[data-act-cb]').forEach(cb => payload.actions[cb.dataset.actCb] = cb.checked);
@@ -976,7 +933,6 @@ const raw = localStorage.getItem(storageKey());
 if(!raw) return;
 try{
 const payload = JSON.parse(raw);
-restoreDynamicRows(payload.dynamic);
 Object.entries(payload.comments || {}).forEach(([k,v]) => {
 const el = document.querySelector(`[data-persist="${cssEscape(k)}"]`);
 if(el){ el.value = v; autoResize(el); }
@@ -1147,14 +1103,9 @@ return '(function(){\n'
 + 'function autoResize(el){if(!el||el.tagName!=="TEXTAREA")return;el.style.height="auto";el.style.height=el.scrollHeight+"px";}\n'
 + 'function toast(m){var t=document.getElementById("toast");if(!t){t=document.createElement("div");t.id="toast";t.className="toast";document.body.appendChild(t);}t.textContent=m;t.classList.add("show");setTimeout(function(){t.classList.remove("show");},1800);}\n'
 + 'function updateActionCounter(){var items=Array.prototype.slice.call(document.querySelectorAll(".act-item")).filter(function(el){return !el.classList.contains("hidden");});var done=items.filter(function(el){var cb=el.querySelector(".act-cb");return cb&&cb.checked;}).length;var ctr=document.getElementById("actCtr");if(ctr)ctr.textContent=done+" of "+items.length+" completed";}\n'
-+ 'function collectDynamicRows(){var comments=Array.prototype.slice.call(document.querySelectorAll(".comment-row")).map(function(row){return {html:row.outerHTML,owner:row.dataset.dynamicComment||""};});var actions=Array.prototype.slice.call(document.querySelectorAll(".act-item")).filter(function(row){return row.id&&!/^act-\\d+$/.test(row.id);}).map(function(row){return row.outerHTML;});return {comments:comments,actions:actions};}\n'
-+ 'function restoreDynamicRows(dynamic){if(!dynamic)return;(dynamic.comments||[]).forEach(function(item){var html=typeof item==="string"?item:item.html;var owner=typeof item==="string"?"":item.owner;if(!html)return;var holder=document.createElement("div");holder.innerHTML=html.trim();var row=holder.firstElementChild;if(!row||!row.id||document.getElementById(row.id))return;var input=owner?document.querySelector("[data-add-input=\\""+cssEscape(owner)+"\\"]"):null;if(input){var addWrap=input.closest(".inline-add");if(addWrap)addWrap.parentNode.insertBefore(row,addWrap);}});(dynamic.actions||[]).forEach(function(html){var holder=document.createElement("div");holder.innerHTML=String(html).trim();var row=holder.firstElementChild;var list=document.getElementById("actList");if(row&&row.id&&list&&!document.getElementById(row.id))list.appendChild(row);});}\n'
-+ 'function syncFormValues(){document.querySelectorAll(\"textarea\").forEach(function(t){t.textContent=t.value;});document.querySelectorAll(\"input\").forEach(function(i){if(i.type===\"checkbox\"||i.type===\"radio\"){if(i.checked)i.setAttribute(\"checked\",\"checked\");else i.removeAttribute(\"checked\");}else{i.setAttribute(\"value\",i.value);}}); }\n'
-+ 'function serializeCurrent(){syncFormValues();var clone=document.documentElement.cloneNode(true);clone.querySelectorAll(\"#toast\").forEach(function(el){el.remove();});return \"<!DOCTYPE html>\\n\"+clone.outerHTML;}\n'
-+ 'function notifyParent(){try{var msg={type:\"bva-board-update\",storageKey:STORAGE_KEY,html:serializeCurrent()};if(window.parent&&window.parent!==window)window.parent.postMessage(msg,\"*\");}catch(e){}}\n'
-+ 'function saveState(silent){var p={comments:{},actions:{},hidden:[],dynamic:collectDynamicRows()};document.querySelectorAll("[data-persist]").forEach(function(el){p.comments[el.dataset.persist]=el.value;});document.querySelectorAll("[data-act-cb]").forEach(function(cb){p.actions[cb.dataset.actCb]=cb.checked;});document.querySelectorAll(".hidden[id]").forEach(function(el){p.hidden.push(el.id);});try{localStorage.setItem(STORAGE_KEY,JSON.stringify(p));}catch(e){}updateActionCounter();notifyParent();if(!silent)toast("Board saved");}\n'
-+ 'function restoreSavedState(){var raw;try{raw=localStorage.getItem(STORAGE_KEY);}catch(e){}if(!raw)return;try{var p=JSON.parse(raw);restoreDynamicRows(p.dynamic);Object.keys(p.comments||{}).forEach(function(k){var el=document.querySelector("[data-persist=\\""+cssEscape(k)+"\\"]");if(el){el.value=p.comments[k];autoResize(el);}});Object.keys(p.actions||{}).forEach(function(k){var cb=document.querySelector("[data-act-cb=\\""+cssEscape(k)+"\\"]");if(cb)cb.checked=!!p.actions[k];});(p.hidden||[]).forEach(function(id){var el=document.getElementById(id);if(el)el.classList.add("hidden");});updateActionCounter();}catch(e){}}\n'
-+ 'function addCommentRow(blockId){var input=document.querySelector("[data-add-input=\\""+blockId+"\\"]");var text=input?input.value.trim():"";var rowId=slug(blockId+"-"+Date.now());var row=document.createElement("div");row.className="comment-row";row.dataset.dynamicComment=blockId;row.id=rowId+"-row";row.innerHTML="<textarea class=\\"vedit\\" rows=\\"2\\" data-persist=\\"comment:"+rowId+"\\">"+escapeHtml(text)+"</textarea><button class=\\"del-btn\\" data-del-row=\\""+rowId+"\\"><i class=\\"ti ti-trash\\"></i></button>";var addWrap=input.closest(".inline-add");addWrap.parentNode.insertBefore(row,addWrap);var ta=row.querySelector("textarea");ta.addEventListener("input",function(){autoResize(ta);saveState(true);});autoResize(ta);if(input)input.value="";saveState(true);}\n'
++ 'function saveState(silent){var p={comments:{},actions:{},hidden:[]};document.querySelectorAll("[data-persist]").forEach(function(el){p.comments[el.dataset.persist]=el.value;});document.querySelectorAll("[data-act-cb]").forEach(function(cb){p.actions[cb.dataset.actCb]=cb.checked;});document.querySelectorAll(".hidden[id]").forEach(function(el){p.hidden.push(el.id);});try{localStorage.setItem(STORAGE_KEY,JSON.stringify(p));}catch(e){}updateActionCounter();if(!silent)toast("Board saved");}\n'
++ 'function restoreSavedState(){var raw;try{raw=localStorage.getItem(STORAGE_KEY);}catch(e){}if(!raw)return;try{var p=JSON.parse(raw);Object.keys(p.comments||{}).forEach(function(k){var el=document.querySelector("[data-persist=\\""+cssEscape(k)+"\\"]");if(el){el.value=p.comments[k];autoResize(el);}});Object.keys(p.actions||{}).forEach(function(k){var cb=document.querySelector("[data-act-cb=\\""+cssEscape(k)+"\\"]");if(cb)cb.checked=!!p.actions[k];});(p.hidden||[]).forEach(function(id){var el=document.getElementById(id);if(el)el.classList.add("hidden");});updateActionCounter();}catch(e){}}\n'
++ 'function addCommentRow(blockId){var input=document.querySelector("[data-add-input=\\""+blockId+"\\"]");var text=input?input.value.trim():"";var rowId=slug(blockId+"-"+Date.now());var row=document.createElement("div");row.className="comment-row";row.id=rowId+"-row";row.innerHTML="<textarea class=\\"vedit\\" rows=\\"2\\" data-persist=\\"comment:"+rowId+"\\">"+escapeHtml(text)+"</textarea><button class=\\"del-btn\\" data-del-row=\\""+rowId+"\\"><i class=\\"ti ti-trash\\"></i></button>";var addWrap=input.closest(".inline-add");addWrap.parentNode.insertBefore(row,addWrap);var ta=row.querySelector("textarea");ta.addEventListener("input",function(){autoResize(ta);saveState(true);});autoResize(ta);if(input)input.value="";saveState(true);}\n'
 + 'function addAction(){var list=document.getElementById("actList");if(!list)return;var id="act-"+Date.now();var div=document.createElement("div");div.className="act-item";div.id=id;div.innerHTML="<input type=\\"checkbox\\" class=\\"act-cb\\" data-act-cb=\\""+id+"\\"><textarea class=\\"act-text\\" rows=\\"1\\" data-persist=\\"action:"+id+"\\" placeholder=\\"New action item...\\"></textarea><button class=\\"del-btn\\" data-del-row=\\""+id+"\\"><i class=\\"ti ti-trash\\"></i></button>";list.appendChild(div);div.querySelector("[data-act-cb]").addEventListener("change",function(){saveState(true);});var ta=div.querySelector("textarea");ta.addEventListener("input",function(){autoResize(ta);saveState(true);});autoResize(ta);updateActionCounter();saveState(true);}\n'
 + 'function downloadHtml(){try{document.querySelectorAll("textarea").forEach(function(t){t.textContent=t.value;});document.querySelectorAll("input").forEach(function(i){if(i.type==="checkbox"){if(i.checked)i.setAttribute("checked","checked");else i.removeAttribute("checked");}else{i.setAttribute("value",i.value);}});var clone=document.documentElement.cloneNode(true);clone.querySelectorAll("#toast").forEach(function(el){el.remove();});var html="<!DOCTYPE html>\\n"+clone.outerHTML;var blob=new Blob([html],{type:"text/html"});var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=FILE_BASE+".html";a.click();URL.revokeObjectURL(a.href);toast("HTML downloaded");}catch(e){console.error(e);toast("Could not export HTML");}}\n'
 + 'function downloadPdf(){if(typeof html2canvas==="undefined"||!window.jspdf){toast("PDF libraries did not load");return;}saveState(true);var target=document.querySelector(".main-workspace");if(!target){toast("Could not find dashboard content");return;}var hiddenEls=Array.prototype.slice.call(target.querySelectorAll(".hidden, .del-btn, .del-block, .add-act, .mini-btn, .ghost-btn, .topbar-actions, #back-nav, #home-nav"));var restore=hiddenEls.map(function(el){return [el,el.style.display];});var aside=document.querySelector("aside");var asideDisplay=aside?aside.style.display:null;var prevML=target.style.marginLeft,prevW=target.style.width;toast("Building PDF...");hiddenEls.forEach(function(el){el.style.display="none";});if(aside)aside.style.display="none";target.style.marginLeft="0";target.style.width="100%";setTimeout(function(){html2canvas(target,{scale:2,useCORS:true,backgroundColor:"#f8fafc"}).then(function(canvas){var jsPDF=window.jspdf.jsPDF;var pdf=new jsPDF("p","pt","a4");var pageWidth=pdf.internal.pageSize.getWidth();var pageHeight=pdf.internal.pageSize.getHeight();var ratio=canvas.width/pageWidth;var pageHeightPx=Math.max(1,Math.floor(pageHeight*ratio));var rendered=0,first=true;while(rendered<canvas.height){var sh=Math.min(pageHeightPx,canvas.height-rendered);var sc=document.createElement("canvas");sc.width=canvas.width;sc.height=sh;sc.getContext("2d").drawImage(canvas,0,rendered,canvas.width,sh,0,0,canvas.width,sh);var img=sc.toDataURL("image/jpeg",0.92);if(!first)pdf.addPage();pdf.addImage(img,"JPEG",0,0,pageWidth,sh/ratio);rendered+=sh;first=false;}pdf.save(FILE_BASE+".pdf");toast("PDF downloaded");}).catch(function(e){console.error(e);toast("Could not export PDF");}).then(function(){restore.forEach(function(pr){pr[0].style.display=pr[1];});if(aside)aside.style.display=asideDisplay;target.style.marginLeft=prevML;target.style.width=prevW;});},60);}\n'
@@ -1238,7 +1189,6 @@ state.generated.push({
 title: model.meta.dashboardCode,
 subtitle: `${model.meta.monthToken} ${model.meta.fyToken} · ${model.meta.currentQuarterLabel}`,
 fileBase: exportFileBase(),
-storageKey: storageKey(),
 html
 });
 }
@@ -1333,7 +1283,6 @@ out.push({
 title: g.title,
 subtitle: g.subtitle,
 fileName,
-storageKey: g.storageKey || '',
 html: g.html
 });
 return out;
@@ -1370,6 +1319,13 @@ link.click();
 setTimeout(() => URL.revokeObjectURL(url), 1000);
 toast('ZIP downloaded');
 }
+function encodeBase64Utf8(value){
+const bytes = new TextEncoder().encode(String(value == null ? '' : value));
+let binary = '';
+for(let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+return btoa(binary);
+}
+
 function buildPackageHubHtml(boards){
 const boardFixCss = `
 <style id="bva-package-board-fix">
@@ -1411,28 +1367,29 @@ max-width:100%!important;
 overflow:hidden!important;
 }
 .trend-wrap img,
-.wf-wrap img{
+.wf-wrap img,
+.trend-wrap canvas,
+.wf-wrap canvas{
 display:block!important;
 width:100%!important;
 max-width:100%!important;
 height:100%!important;
 max-height:100%!important;
 object-fit:contain!important;
+object-position:center!important;
 }
 </style>`;
-const packageBoards = boards.map(board => ({
-...board,
-html: String(board.html).replace(
-/<\/head>/i,
-`${boardFixCss}</head>`
-)
-}));
-const safeBoards = JSON.stringify(packageBoards)
-.replace(/</g, '\\u003c')
-.replace(/>/g, '\\u003e')
-.replace(/&/g, '\\u0026')
-.replace(/\u2028/g, '\\u2028')
-.replace(/\u2029/g, '\\u2029');
+
+const packagePayload = {
+  boards: boards.map(board => ({
+    title: board.title,
+    subtitle: board.subtitle,
+    fileName: board.fileName,
+    htmlBase64: encodeBase64Utf8(board.html)
+  }))
+};
+const packageData = encodeBase64Utf8(JSON.stringify(packagePayload));
+
 return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1477,250 +1434,210 @@ padding:18px 24px;
 border-bottom:1px solid #e9eef7;
 flex-shrink:0;
 }
-.hub-title{
-font-size:22px;
-font-weight:800;
-}
-.hub-sub{
-margin-top:5px;
-color:#64748b;
-font-size:12px;
-}
-.hub-actions{
-display:flex;
-gap:9px;
-}
-.hub-btn{
-border:1px solid #cbd5e1;
-border-radius:9px;
-padding:10px 14px;
-background:#fff;
-color:#334155;
-font-weight:800;
-cursor:pointer;
-}
-.hub-btn.primary{
-background:#4f46e5;
-color:#fff;
-border-color:#4f46e5;
-}
-.tabs{
-display:flex;
-gap:6px;
-overflow-x:auto;
-padding:12px 20px;
-border-bottom:1px solid #e9eef7;
-background:#f8fafc;
-flex-shrink:0;
-}
-.tab{
-border:1px solid #cbd5e1;
-border-radius:9px;
-padding:9px 14px;
-background:#fff;
-color:#475569;
-font-weight:800;
-cursor:pointer;
-white-space:nowrap;
-}
-.tab.active{
-background:#4f46e5;
-border-color:#4f46e5;
-color:#fff;
-}
-.status{
-padding:7px 22px;
-color:#64748b;
-font-size:11px;
-border-bottom:1px solid #e9eef7;
-flex-shrink:0;
-}
-.frames{
-flex:1;
-min-height:0;
-height:auto;
-overflow:hidden;
-}
-.board-frame{
-display:none;
-width:100%;
-height:100%;
-min-height:0;
-border:0;
-background:#f7f9fd;
-}
-.board-frame.active{
-display:block;
-}
+.hub-title{font-size:22px;font-weight:800}
+.hub-sub{margin-top:5px;color:#64748b;font-size:12px}
+.hub-actions{display:flex;gap:9px}
+.hub-btn{border:1px solid #cbd5e1;border-radius:9px;padding:10px 14px;background:#fff;color:#334155;font-weight:800;cursor:pointer}
+.hub-btn.primary{background:#4f46e5;color:#fff;border-color:#4f46e5}
+.tabs{display:flex;gap:6px;overflow-x:auto;padding:12px 20px;border-bottom:1px solid #e9eef7;background:#f8fafc;flex-shrink:0}
+.tab{border:1px solid #cbd5e1;border-radius:9px;padding:9px 14px;background:#fff;color:#475569;font-weight:800;cursor:pointer;white-space:nowrap}
+.tab.active{background:#4f46e5;border-color:#4f46e5;color:#fff}
+.status{padding:7px 22px;color:#64748b;font-size:11px;border-bottom:1px solid #e9eef7;flex-shrink:0}
+.frames{flex:1;min-height:0;height:auto;overflow:hidden}
+.board-frame{display:none;width:100%;height:100%;min-height:0;border:0;background:#f7f9fd}
+.board-frame.active{display:block}
 </style>
 </head>
 <body>
 <div class="hub">
-<div class="hub-header">
-<div>
-<div class="hub-title">BvA Board Package</div>
-<div class="hub-sub">Each tab contains an independent editable board.</div>
+  <div class="hub-header">
+    <div>
+      <div class="hub-title">BvA Board Package</div>
+      <div class="hub-sub">Each tab contains an independent editable board.</div>
+    </div>
+    <div class="hub-actions">
+      <button class="hub-btn primary" id="download-zip">Download ZIP</button>
+    </div>
+  </div>
+  <div class="tabs" id="tabs"></div>
+  <div class="status" id="status"></div>
+  <div class="frames" id="frames"></div>
 </div>
-<div class="hub-actions">
-<button class="hub-btn primary" id="download-zip">
-Download ZIP
-</button>
-</div>
-</div>
-<div class="tabs" id="tabs"></div>
-<div class="status" id="status"></div>
-<div class="frames" id="frames"></div>
-</div>
+<script id="bva-package-data">window.__BVA_PACKAGE_DATA__ = ${JSON.stringify(packageData)};</script>
 <script>
-window.__BVA_BOARDS__ = ${safeBoards};
 (function(){
-const boards = window.__BVA_BOARDS__ || [];
-const tabs = document.getElementById('tabs');
-const frames = document.getElementById('frames');
-const status = document.getElementById('status');
-window.addEventListener('message', event => {
-const data = event.data || {};
-if(data.type !== 'bva-board-update' || !data.html) return;
-const frameList = Array.from(frames.querySelectorAll('.board-frame'));
-const frameIndex = frameList.findIndex(frame => frame.contentWindow === event.source);
-if(frameIndex < 0) return;
-boards[frameIndex].html = data.html;
-try{
-if(window.opener && !window.opener.closed){
-window.opener.postMessage({
-type:'bva-board-update',
-storageKey:boards[frameIndex].storageKey,
-html:data.html
-}, '*');
-}
-}catch(e){}
-});
-boards.forEach((board, index) => {
-const tab = document.createElement('button');
-tab.className = 'tab';
-tab.textContent = board.title || ('Board ' + (index + 1));
-tabs.appendChild(tab);
-const frame = document.createElement('iframe');
-frame.className = 'board-frame';
-frame.srcdoc = board.html;
-frames.appendChild(frame);
-tab.addEventListener('click', () => activate(index));
-});
-function activate(index){
-document.querySelectorAll('.tab').forEach((tab, i) => {
-tab.classList.toggle('active', i === index);
-});
-document.querySelectorAll('.board-frame').forEach((frame, i) => {
-frame.classList.toggle('active', i === index);
-});
-const board = boards[index];
-status.textContent = board
-? board.title + ' · ' + board.subtitle
-: '';
-}
-function waitForFrame(frame){
-if(
-frame.contentDocument &&
-frame.contentDocument.readyState === 'complete'
-){
-return Promise.resolve();
-}
-return new Promise(resolve => {
-frame.addEventListener('load', resolve, { once:true });
-});
-}
-function snapshotFrame(frame){
-const sourceDoc = frame.contentDocument;
-if(!sourceDoc){
-throw new Error('Could not read board frame');
-}
-const clone = sourceDoc.documentElement.cloneNode(true);
-const sourceFields = sourceDoc.querySelectorAll('textarea,input,select');
-const clonedFields = clone.querySelectorAll('textarea,input,select');
-sourceFields.forEach((source, index) => {
-const target = clonedFields[index];
-if(!target) return;
-if(source.tagName === 'TEXTAREA'){
-target.textContent = source.value;
-}else if(
-source.type === 'checkbox' ||
-source.type === 'radio'
-){
-if(source.checked){
-target.setAttribute('checked','checked');
-}else{
-target.removeAttribute('checked');
-}
-}else if(source.tagName === 'SELECT'){
-Array.from(target.options).forEach((option, i) => {
-const selected =
-source.options[i] &&
-source.options[i].selected;
-option.selected = selected;
-if(selected){
-option.setAttribute('selected','selected');
-}else{
-option.removeAttribute('selected');
-}
-});
-}else{
-target.setAttribute('value', source.value);
-}
-});
-clone.querySelectorAll('#toast').forEach(el => el.remove());
-return '<!DOCTYPE html>\\n' + clone.outerHTML;
-}
-async function downloadZip(){
-if(typeof JSZip === 'undefined'){
-alert('JSZip could not be loaded.');
-return;
-}
-const frameList = Array.from(
-document.querySelectorAll('.board-frame')
-);
-await Promise.all(frameList.map(waitForFrame));
-const currentBoards = frameList.map((frame, index) => ({
-title: boards[index].title,
-subtitle: boards[index].subtitle,
-fileName: boards[index].fileName,
-html: snapshotFrame(frame)
-}));
-const zip = new JSZip();
-currentBoards.forEach(board => {
-zip.file(board.fileName, board.html);
-});
-zip.file('index.html', buildUpdatedIndex(currentBoards));
-const blob = await zip.generateAsync({ type:'blob' });
-const url = URL.createObjectURL(blob);
-const link = document.createElement('a');
-link.href = url;
-link.download = 'bva_boards_updated.zip';
-link.click();
-setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-function buildUpdatedIndex(updatedBoards){
-const json = JSON.stringify(updatedBoards)
-.replace(/</g, '\\\\u003c')
-.replace(/>/g, '\\\\u003e')
-.replace(/&/g, '\\\\u0026')
-.replace(/\\u2028/g, '\\\\u2028')
-.replace(/\\u2029/g, '\\\\u2029');
-return document.documentElement.outerHTML.replace(
-/window\\.__BVA_BOARDS__\\s*=\\s*[^;]+;/,
-'window.__BVA_BOARDS__ = ' + json + ';'
-);
-}
-document
-.getElementById('download-zip')
-.addEventListener('click', downloadZip);
-if(boards.length){
-activate(0);
-}
+  function decodeBase64Utf8(value){
+    var binary = atob(value || '');
+    var bytes = new Uint8Array(binary.length);
+    for(var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    if(window.TextDecoder) return new TextDecoder('utf-8').decode(bytes);
+    var escaped = '';
+    for(var j = 0; j < bytes.length; j++) escaped += '%' + ('00' + bytes[j].toString(16)).slice(-2);
+    return decodeURIComponent(escaped);
+  }
+
+  function readBoards(){
+    try{
+      var payload = JSON.parse(decodeBase64Utf8(window.__BVA_PACKAGE_DATA__));
+      return (payload.boards || []).map(function(board){
+        return {
+          title: board.title || '',
+          subtitle: board.subtitle || '',
+          fileName: board.fileName || 'board.html',
+          html: decodeBase64Utf8(board.htmlBase64 || '')
+        };
+      });
+    }catch(error){
+      console.error('Could not decode BvA package data.', error);
+      return [];
+    }
+  }
+
+  var boards = readBoards();
+  var tabs = document.getElementById('tabs');
+  var frames = document.getElementById('frames');
+  var status = document.getElementById('status');
+
+  boards.forEach(function(board, index){
+    var tab = document.createElement('button');
+    tab.className = 'tab';
+    tab.textContent = board.title || ('Board ' + (index + 1));
+    tabs.appendChild(tab);
+
+    var frame = document.createElement('iframe');
+    frame.className = 'board-frame';
+    frame.dataset.index = index;
+    frame.srcdoc = board.html;
+    frames.appendChild(frame);
+
+    tab.addEventListener('click', function(){ activate(index); });
+  });
+
+  function activate(index){
+    tabs.querySelectorAll('.tab').forEach(function(tab, i){
+      tab.classList.toggle('active', i === index);
+    });
+    frames.querySelectorAll('.board-frame').forEach(function(frame, i){
+      frame.classList.toggle('active', i === index);
+    });
+    var board = boards[index];
+    status.textContent = board ? board.title + ' · ' + board.subtitle : '';
+  }
+
+  function waitForFrame(frame){
+    if(frame.contentDocument && frame.contentDocument.readyState === 'complete'){
+      return Promise.resolve();
+    }
+    return new Promise(function(resolve){
+      frame.addEventListener('load', resolve, { once:true });
+    });
+  }
+
+  function snapshotFrame(frame){
+    var sourceDoc = frame.contentDocument;
+    if(!sourceDoc) throw new Error('Could not read board frame');
+
+    var clone = sourceDoc.documentElement.cloneNode(true);
+    var sourceFields = sourceDoc.querySelectorAll('textarea,input,select');
+    var clonedFields = clone.querySelectorAll('textarea,input,select');
+
+    sourceFields.forEach(function(source, index){
+      var target = clonedFields[index];
+      if(!target) return;
+
+      if(source.tagName === 'TEXTAREA'){
+        target.textContent = source.value;
+      }else if(source.type === 'checkbox' || source.type === 'radio'){
+        if(source.checked) target.setAttribute('checked', 'checked');
+        else target.removeAttribute('checked');
+      }else if(source.tagName === 'SELECT'){
+        Array.from(target.options).forEach(function(option, optionIndex){
+          var selected = source.options[optionIndex] && source.options[optionIndex].selected;
+          option.selected = selected;
+          if(selected) option.setAttribute('selected', 'selected');
+          else option.removeAttribute('selected');
+        });
+      }else{
+        target.setAttribute('value', source.value);
+      }
+    });
+
+    clone.querySelectorAll('#toast').forEach(function(element){ element.remove(); });
+    return '<!DOCTYPE html>\\n' + clone.outerHTML;
+  }
+
+  function encodeBase64Utf8(value){
+    var bytes = new TextEncoder().encode(String(value == null ? '' : value));
+    var binary = '';
+    for(var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  }
+
+  async function downloadZip(){
+    if(typeof JSZip === 'undefined'){
+      alert('JSZip could not be loaded.');
+      return;
+    }
+
+    var frameList = Array.from(frames.querySelectorAll('.board-frame'));
+    await Promise.all(frameList.map(waitForFrame));
+
+    var currentBoards = frameList.map(function(frame, index){
+      return {
+        title: boards[index].title,
+        subtitle: boards[index].subtitle,
+        fileName: boards[index].fileName,
+        html: snapshotFrame(frame)
+      };
+    });
+
+    var zip = new JSZip();
+    currentBoards.forEach(function(board){ zip.file(board.fileName, board.html); });
+    zip.file('index.html', buildUpdatedIndex(currentBoards));
+
+    var blob = await zip.generateAsync({ type:'blob' });
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement('a');
+    link.href = url;
+    link.download = 'bva_boards_updated.zip';
+    link.click();
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+  }
+
+  function buildUpdatedIndex(updatedBoards){
+    var payload = {
+      boards: updatedBoards.map(function(board){
+        return {
+          title: board.title,
+          subtitle: board.subtitle,
+          fileName: board.fileName,
+          htmlBase64: encodeBase64Utf8(board.html)
+        };
+      })
+    };
+    var encoded = encodeBase64Utf8(JSON.stringify(payload));
+    var clone = document.documentElement.cloneNode(true);
+    var dataScript = clone.querySelector('#bva-package-data');
+    if(dataScript){
+      dataScript.textContent = 'window.__BVA_PACKAGE_DATA__ = ' + JSON.stringify(encoded) + ';';
+    }
+    var clonedTabs = clone.querySelector('#tabs');
+    var clonedFrames = clone.querySelector('#frames');
+    var clonedStatus = clone.querySelector('#status');
+    if(clonedTabs) clonedTabs.innerHTML = '';
+    if(clonedFrames) clonedFrames.innerHTML = '';
+    if(clonedStatus) clonedStatus.textContent = '';
+    return '<!DOCTYPE html>\\n' + clone.outerHTML;
+  }
+
+  document.getElementById('download-zip').addEventListener('click', downloadZip);
+  if(boards.length) activate(0);
 })();
 </script>
 </body>
 </html>`;
 }
+
 async function downloadPdf(){
 if(!state.model){ toast('Build a dashboard first'); return; }
 if(typeof html2canvas === 'undefined' || !window.jspdf){
