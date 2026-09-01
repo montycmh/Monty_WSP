@@ -969,6 +969,23 @@ else option.removeAttribute('selected');
 });
 });
 }
+function bindActionRows(){
+document.querySelectorAll('#actList .act-item [data-act-cb]').forEach(cb => {
+cb.addEventListener('change', saveState);
+});
+document.querySelectorAll('#actList .act-item [data-persist]').forEach(el => {
+el.addEventListener('input', () => { autoResize(el); saveState(); });
+});
+document.querySelectorAll('#actList .act-item [data-del-row]').forEach(btn => {
+btn.addEventListener('click', () => {
+const id = btn.dataset.delRow;
+const row = document.getElementById(id + '-row') || document.getElementById(id);
+if(row) row.classList.add('hidden');
+saveState();
+updateActionCounter();
+});
+});
+}
 function saveState(){
 if(!state.model) return;
 syncEditableValues(document);
@@ -976,11 +993,14 @@ const key = storageKey();
 const payload = {
 comments: {},
 actions: {},
+actionMarkup: '',
 hidden: []
 };
 document.querySelectorAll('[data-persist]').forEach(el => payload.comments[el.dataset.persist] = el.value);
 document.querySelectorAll('[data-act-cb]').forEach(cb => payload.actions[cb.dataset.actCb] = cb.checked);
 document.querySelectorAll('.hidden[id]').forEach(el => payload.hidden.push(el.id));
+const actionList = document.getElementById('actList');
+if(actionList) payload.actionMarkup = actionList.innerHTML;
 localStorage.setItem(key, JSON.stringify(payload));
 updateActionCounter();
 toast('Board saved');
@@ -998,6 +1018,13 @@ Object.entries(payload.actions || {}).forEach(([k,v]) => {
 const cb = document.querySelector(`[data-act-cb="${cssEscape(k)}"]`);
 if(cb) cb.checked = !!v;
 });
+if(payload.actionMarkup){
+const actionList = document.getElementById('actList');
+if(actionList){
+actionList.innerHTML = payload.actionMarkup;
+bindActionRows();
+}
+}
 (payload.hidden || []).forEach(id => {
 const el = document.getElementById(id);
 if(el) el.classList.add('hidden');
@@ -1156,8 +1183,9 @@ return '(function(){\n'
 + 'function autoResize(el){if(!el||el.tagName!=="TEXTAREA")return;el.style.height="auto";el.style.height=el.scrollHeight+"px";}\n'
 + 'function toast(m){var t=document.getElementById("toast");if(!t){t=document.createElement("div");t.id="toast";t.className="toast";document.body.appendChild(t);}t.textContent=m;t.classList.add("show");setTimeout(function(){t.classList.remove("show");},1800);}\n'
 + 'function updateActionCounter(){var items=Array.prototype.slice.call(document.querySelectorAll(".act-item")).filter(function(el){return !el.classList.contains("hidden");});var done=items.filter(function(el){var cb=el.querySelector(".act-cb");return cb&&cb.checked;}).length;var ctr=document.getElementById("actCtr");if(ctr)ctr.textContent=done+" of "+items.length+" completed";}\n'
-+ 'function saveState(silent){var p={comments:{},actions:{},hidden:[]};document.querySelectorAll("[data-persist]").forEach(function(el){p.comments[el.dataset.persist]=el.value;});document.querySelectorAll("[data-act-cb]").forEach(function(cb){p.actions[cb.dataset.actCb]=cb.checked;});document.querySelectorAll(".hidden[id]").forEach(function(el){p.hidden.push(el.id);});try{localStorage.setItem(STORAGE_KEY,JSON.stringify(p));}catch(e){}updateActionCounter();if(!silent)toast("Board saved");}\n'
-+ 'function restoreSavedState(){var raw;try{raw=localStorage.getItem(STORAGE_KEY);}catch(e){}if(!raw)return;try{var p=JSON.parse(raw);Object.keys(p.comments||{}).forEach(function(k){var el=document.querySelector("[data-persist=\\""+cssEscape(k)+"\\"]");if(el){el.value=p.comments[k];autoResize(el);}});Object.keys(p.actions||{}).forEach(function(k){var cb=document.querySelector("[data-act-cb=\\""+cssEscape(k)+"\\"]");if(cb)cb.checked=!!p.actions[k];});(p.hidden||[]).forEach(function(id){var el=document.getElementById(id);if(el)el.classList.add("hidden");});updateActionCounter();}catch(e){}}\n'
++ 'function bindActionRows(){document.querySelectorAll("#actList .act-item [data-act-cb]").forEach(function(cb){cb.addEventListener("change",function(){saveState(true);});});document.querySelectorAll("#actList .act-item [data-persist]").forEach(function(el){el.addEventListener("input",function(){autoResize(el);saveState(true);});});document.querySelectorAll("#actList .act-item [data-del-row]").forEach(function(btn){btn.addEventListener("click",function(){var id=btn.dataset.delRow;var row=document.getElementById(id+"-row")||document.getElementById(id);if(row)row.classList.add("hidden");saveState(true);updateActionCounter();});});}\n'
+
++ 'function restoreSavedState(){var raw;try{raw=localStorage.getItem(STORAGE_KEY);}catch(e){}if(!raw)return;try{var p=JSON.parse(raw);Object.keys(p.comments||{}).forEach(function(k){var el=document.querySelector("[data-persist=\\""+cssEscape(k)+"\\"]");if(el){el.value=p.comments[k];autoResize(el);}});Object.keys(p.actions||{}).forEach(function(k){var cb=document.querySelector("[data-act-cb=\\""+cssEscape(k)+"\\"]");if(cb)cb.checked=!!p.actions[k];});if(p.actionMarkup){var list=document.getElementById("actList");if(list){list.innerHTML=p.actionMarkup;bindActionRows();}}(p.hidden||[]).forEach(function(id){var el=document.getElementById(id);if(el)el.classList.add("hidden");});updateActionCounter();}catch(e){}}\n'
 + 'function addCommentRow(blockId){var input=document.querySelector("[data-add-input=\\""+blockId+"\\"]");var text=input?input.value.trim():"";var rowId=slug(blockId+"-"+Date.now());var row=document.createElement("div");row.className="comment-row";row.dataset.dynamic="1";row.id=rowId+"-row";row.innerHTML="<textarea class=\\"vedit\\" rows=\\"2\\" data-persist=\\"comment:"+rowId+"\\">"+escapeHtml(text)+"</textarea><button class=\\"del-btn\\" data-del-row=\\""+rowId+"\\"><i class=\\"ti ti-trash\\"></i></button>";var addWrap=input.closest(".inline-add");addWrap.parentNode.insertBefore(row,addWrap);var ta=row.querySelector("textarea");ta.addEventListener("input",function(){autoResize(ta);saveState(true);});autoResize(ta);if(input)input.value="";saveState(true);}\n'
 + 'function addAction(){var list=document.getElementById("actList");if(!list)return;var id="act-"+Date.now();var div=document.createElement("div");div.className="act-item";div.dataset.dynamic="1";div.id=id;div.innerHTML="<input type=\\"checkbox\\" class=\\"act-cb\\" data-act-cb=\\""+id+"\\"><textarea class=\\"act-text\\" rows=\\"1\\" data-persist=\\"action:"+id+"\\" placeholder=\\"New action item...\\"></textarea><button class=\\"del-btn\\" data-del-row=\\""+id+"\\"><i class=\\"ti ti-trash\\"></i></button>";list.appendChild(div);div.querySelector("[data-act-cb]").addEventListener("change",function(){saveState(true);});var ta=div.querySelector("textarea");ta.addEventListener("input",function(){autoResize(ta);saveState(true);});autoResize(ta);updateActionCounter();saveState(true);}\n'
 + 'function downloadHtml(){try{document.querySelectorAll("textarea").forEach(function(t){t.textContent=t.value;});document.querySelectorAll("input").forEach(function(i){if(i.type==="checkbox"){if(i.checked)i.setAttribute("checked","checked");else i.removeAttribute("checked");}else{i.setAttribute("value",i.value);}});var clone=document.documentElement.cloneNode(true);clone.querySelectorAll("#toast").forEach(function(el){el.remove();});var html="<!DOCTYPE html>\\n"+clone.outerHTML;var blob=new Blob([html],{type:"text/html"});var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=FILE_BASE+".html";a.click();URL.revokeObjectURL(a.href);toast("HTML downloaded");}catch(e){console.error(e);toast("Could not export HTML");}}\n'
