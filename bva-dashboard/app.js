@@ -6,7 +6,8 @@ model: null,
 edits: {},
 boardCount: 1,
 boards: [],          // per-board file sets: [{quarter,year,hc,te,opex}, ...]
-generated: []        // built standalone boards: [{title, subtitle, fileBase, html}, ...]
+generated: [],       // built standalone boards: [{title, subtitle, fileBase, html}, ...]
+openedWindows: new Map() // open individual board windows keyed by board index
 };
 const chartRefs = {};
 let REVIEW_MONTH_IDX = -1, REVIEW_Q_IDX = -1;
@@ -151,6 +152,7 @@ state.edits = {};
 state.files = { quarter:null, year:null, hc:null, te:null, opex:null };
 state.boards = [];
 state.generated = [];
+state.openedWindows.clear();
 dom.root.innerHTML = '';
 dom.root.classList.add('hidden');
 if(dom.backNav) dom.backNav.classList.add('hidden');
@@ -502,7 +504,7 @@ return { rows: top, others, totalVar };
 function deriveQuarterDriverBlocks(q, rows, benchmarkKey, threshold){
 const qualified = rows.filter(r => Math.abs(r.variance) > threshold);
 return qualified.map(r => ({
-id: slug(r.label + benchmarkKey),
+id: slug('q-' + r.index + '-' + benchmarkKey + '-' + r.label),
 label: r.label,
 variance: r.variance,
 benchmarkKey,
@@ -512,7 +514,7 @@ comments: []
 }
 function deriveYearDriverBlocks(y, rows, benchmarkKey, threshold){
 return rows.filter(r => Math.abs(r.variance) > threshold).map(r => ({
-id: slug(r.label + benchmarkKey),
+id: slug('y-' + r.index + '-' + benchmarkKey + '-' + r.label),
 label: r.label,
 variance: r.variance,
 benchmarkKey,
@@ -915,6 +917,7 @@ const text = input ? input.value.trim() : '';
 const rowId = slug(blockId + '-' + Date.now());
 const row = document.createElement('div');
 row.className = 'comment-row';
+row.dataset.dynamic = '1';
 row.id = rowId + '-row';
 row.innerHTML = `<textarea class="vedit" rows="2" data-persist="comment:${rowId}">${escapeHtml(text)}</textarea><button class="del-btn" data-del-row="${rowId}"><i class="ti ti-trash"></i></button>`;
 const addWrap = input.closest('.inline-add');
@@ -930,6 +933,7 @@ const list = document.getElementById('actList');
 const id = 'act-' + Date.now();
 const div = document.createElement('div');
 div.className = 'act-item';
+div.dataset.dynamic = '1';
 div.id = id;
 div.innerHTML = `<input type="checkbox" class="act-cb" data-act-cb="${id}"><textarea class="act-text" rows="1" data-persist="action:${id}" placeholder="New action item..."></textarea><button class="del-btn" data-del-row="${id}"><i class="ti ti-trash"></i></button>`;
 list.appendChild(div);
@@ -947,8 +951,27 @@ const ctr = document.getElementById('actCtr');
 if(ctr) ctr.textContent = `${done} of ${items.length} completed`;
 }
 function autoResize(el){ if(!el || el.tagName !== 'TEXTAREA') return; el.style.height='auto'; el.style.height = el.scrollHeight + 'px'; }
+function syncEditableValues(root){
+const scope = root || document;
+scope.querySelectorAll('textarea').forEach(t => { t.textContent = t.value; });
+scope.querySelectorAll('input').forEach(i => {
+if(i.type === 'checkbox' || i.type === 'radio'){
+if(i.checked) i.setAttribute('checked','checked');
+else i.removeAttribute('checked');
+}else{
+i.setAttribute('value', i.value);
+}
+});
+scope.querySelectorAll('select').forEach(select => {
+Array.from(select.options).forEach(option => {
+if(option.selected) option.setAttribute('selected','selected');
+else option.removeAttribute('selected');
+});
+});
+}
 function saveState(){
 if(!state.model) return;
+syncEditableValues(document);
 const key = storageKey();
 const payload = {
 comments: {},
@@ -1090,11 +1113,7 @@ async function buildStandaloneHtml(opts){
 const interactive = !!(opts && opts.interactive);
 const cssText = await fetchInlineCss();
 // Persist current field values into the DOM so the clone captures typed text.
-document.querySelectorAll('#dashboard-root textarea').forEach(t => { t.textContent = t.value; });
-document.querySelectorAll('#dashboard-root input').forEach(i => {
-if(i.type === 'checkbox'){ if(i.checked) i.setAttribute('checked','checked'); else i.removeAttribute('checked'); }
-else { i.setAttribute('value', i.value); }
-});
+syncEditableValues(document.getElementById('dashboard-root'));
 const clone = document.documentElement.cloneNode(true);
 if(interactive){
 // Keep interactive controls; only remove things that make no sense in a
@@ -1139,8 +1158,8 @@ return '(function(){\n'
 + 'function updateActionCounter(){var items=Array.prototype.slice.call(document.querySelectorAll(".act-item")).filter(function(el){return !el.classList.contains("hidden");});var done=items.filter(function(el){var cb=el.querySelector(".act-cb");return cb&&cb.checked;}).length;var ctr=document.getElementById("actCtr");if(ctr)ctr.textContent=done+" of "+items.length+" completed";}\n'
 + 'function saveState(silent){var p={comments:{},actions:{},hidden:[]};document.querySelectorAll("[data-persist]").forEach(function(el){p.comments[el.dataset.persist]=el.value;});document.querySelectorAll("[data-act-cb]").forEach(function(cb){p.actions[cb.dataset.actCb]=cb.checked;});document.querySelectorAll(".hidden[id]").forEach(function(el){p.hidden.push(el.id);});try{localStorage.setItem(STORAGE_KEY,JSON.stringify(p));}catch(e){}updateActionCounter();if(!silent)toast("Board saved");}\n'
 + 'function restoreSavedState(){var raw;try{raw=localStorage.getItem(STORAGE_KEY);}catch(e){}if(!raw)return;try{var p=JSON.parse(raw);Object.keys(p.comments||{}).forEach(function(k){var el=document.querySelector("[data-persist=\\""+cssEscape(k)+"\\"]");if(el){el.value=p.comments[k];autoResize(el);}});Object.keys(p.actions||{}).forEach(function(k){var cb=document.querySelector("[data-act-cb=\\""+cssEscape(k)+"\\"]");if(cb)cb.checked=!!p.actions[k];});(p.hidden||[]).forEach(function(id){var el=document.getElementById(id);if(el)el.classList.add("hidden");});updateActionCounter();}catch(e){}}\n'
-+ 'function addCommentRow(blockId){var input=document.querySelector("[data-add-input=\\""+blockId+"\\"]");var text=input?input.value.trim():"";var rowId=slug(blockId+"-"+Date.now());var row=document.createElement("div");row.className="comment-row";row.id=rowId+"-row";row.innerHTML="<textarea class=\\"vedit\\" rows=\\"2\\" data-persist=\\"comment:"+rowId+"\\">"+escapeHtml(text)+"</textarea><button class=\\"del-btn\\" data-del-row=\\""+rowId+"\\"><i class=\\"ti ti-trash\\"></i></button>";var addWrap=input.closest(".inline-add");addWrap.parentNode.insertBefore(row,addWrap);var ta=row.querySelector("textarea");ta.addEventListener("input",function(){autoResize(ta);saveState(true);});autoResize(ta);if(input)input.value="";saveState(true);}\n'
-+ 'function addAction(){var list=document.getElementById("actList");if(!list)return;var id="act-"+Date.now();var div=document.createElement("div");div.className="act-item";div.id=id;div.innerHTML="<input type=\\"checkbox\\" class=\\"act-cb\\" data-act-cb=\\""+id+"\\"><textarea class=\\"act-text\\" rows=\\"1\\" data-persist=\\"action:"+id+"\\" placeholder=\\"New action item...\\"></textarea><button class=\\"del-btn\\" data-del-row=\\""+id+"\\"><i class=\\"ti ti-trash\\"></i></button>";list.appendChild(div);div.querySelector("[data-act-cb]").addEventListener("change",function(){saveState(true);});var ta=div.querySelector("textarea");ta.addEventListener("input",function(){autoResize(ta);saveState(true);});autoResize(ta);updateActionCounter();saveState(true);}\n'
++ 'function addCommentRow(blockId){var input=document.querySelector("[data-add-input=\\""+blockId+"\\"]");var text=input?input.value.trim():"";var rowId=slug(blockId+"-"+Date.now());var row=document.createElement("div");row.className="comment-row";row.dataset.dynamic="1";row.id=rowId+"-row";row.innerHTML="<textarea class=\\"vedit\\" rows=\\"2\\" data-persist=\\"comment:"+rowId+"\\">"+escapeHtml(text)+"</textarea><button class=\\"del-btn\\" data-del-row=\\""+rowId+"\\"><i class=\\"ti ti-trash\\"></i></button>";var addWrap=input.closest(".inline-add");addWrap.parentNode.insertBefore(row,addWrap);var ta=row.querySelector("textarea");ta.addEventListener("input",function(){autoResize(ta);saveState(true);});autoResize(ta);if(input)input.value="";saveState(true);}\n'
++ 'function addAction(){var list=document.getElementById("actList");if(!list)return;var id="act-"+Date.now();var div=document.createElement("div");div.className="act-item";div.dataset.dynamic="1";div.id=id;div.innerHTML="<input type=\\"checkbox\\" class=\\"act-cb\\" data-act-cb=\\""+id+"\\"><textarea class=\\"act-text\\" rows=\\"1\\" data-persist=\\"action:"+id+"\\" placeholder=\\"New action item...\\"></textarea><button class=\\"del-btn\\" data-del-row=\\""+id+"\\"><i class=\\"ti ti-trash\\"></i></button>";list.appendChild(div);div.querySelector("[data-act-cb]").addEventListener("change",function(){saveState(true);});var ta=div.querySelector("textarea");ta.addEventListener("input",function(){autoResize(ta);saveState(true);});autoResize(ta);updateActionCounter();saveState(true);}\n'
 + 'function downloadHtml(){try{document.querySelectorAll("textarea").forEach(function(t){t.textContent=t.value;});document.querySelectorAll("input").forEach(function(i){if(i.type==="checkbox"){if(i.checked)i.setAttribute("checked","checked");else i.removeAttribute("checked");}else{i.setAttribute("value",i.value);}});var clone=document.documentElement.cloneNode(true);clone.querySelectorAll("#toast").forEach(function(el){el.remove();});var html="<!DOCTYPE html>\\n"+clone.outerHTML;var blob=new Blob([html],{type:"text/html"});var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=FILE_BASE+".html";a.click();URL.revokeObjectURL(a.href);toast("HTML downloaded");}catch(e){console.error(e);toast("Could not export HTML");}}\n'
 + 'function downloadPdf(){if(typeof html2canvas==="undefined"||!window.jspdf){toast("PDF libraries did not load");return;}saveState(true);var target=document.querySelector(".main-workspace");if(!target){toast("Could not find dashboard content");return;}var hiddenEls=Array.prototype.slice.call(target.querySelectorAll(".hidden, .del-btn, .del-block, .add-act, .mini-btn, .ghost-btn, .topbar-actions, #back-nav, #home-nav"));var restore=hiddenEls.map(function(el){return [el,el.style.display];});var aside=document.querySelector("aside");var asideDisplay=aside?aside.style.display:null;var prevML=target.style.marginLeft,prevW=target.style.width;toast("Building PDF...");hiddenEls.forEach(function(el){el.style.display="none";});if(aside)aside.style.display="none";target.style.marginLeft="0";target.style.width="100%";setTimeout(function(){html2canvas(target,{scale:2,useCORS:true,backgroundColor:"#f8fafc"}).then(function(canvas){var jsPDF=window.jspdf.jsPDF;var pdf=new jsPDF("p","pt","a4");var pageWidth=pdf.internal.pageSize.getWidth();var pageHeight=pdf.internal.pageSize.getHeight();var ratio=canvas.width/pageWidth;var pageHeightPx=Math.max(1,Math.floor(pageHeight*ratio));var rendered=0,first=true;while(rendered<canvas.height){var sh=Math.min(pageHeightPx,canvas.height-rendered);var sc=document.createElement("canvas");sc.width=canvas.width;sc.height=sh;sc.getContext("2d").drawImage(canvas,0,rendered,canvas.width,sh,0,0,canvas.width,sh);var img=sc.toDataURL("image/jpeg",0.92);if(!first)pdf.addPage();pdf.addImage(img,"JPEG",0,0,pageWidth,sh/ratio);rendered+=sh;first=false;}pdf.save(FILE_BASE+".pdf");toast("PDF downloaded");}).catch(function(e){console.error(e);toast("Could not export PDF");}).then(function(){restore.forEach(function(pr){pr[0].style.display=pr[1];});if(aside)aside.style.display=asideDisplay;target.style.marginLeft=prevML;target.style.width=prevW;});},60);}\n'
 + 'function navTo(sectionId,el){var t=document.getElementById(sectionId);if(!t)return;var top=t.getBoundingClientRect().top+window.scrollY-20;window.scrollTo({top:top,behavior:"smooth"});document.querySelectorAll("aside nav ul li[data-nav]").forEach(function(li){li.classList.remove("active");});if(el)el.classList.add("active");}\n'
@@ -1300,6 +1319,7 @@ try{
 w.document.open();
 w.document.write(g.html);
 w.document.close();
+state.openedWindows.set(w, index);
 w.document.title = `${g.title} — ${g.subtitle}`;
 if(btn){ btn.classList.add('opened'); }
 }catch(e){
@@ -1307,6 +1327,49 @@ console.error(e);
 toast('Could not open the board window');
 }
 }
+function snapshotBoardDocument(sourceDoc){
+if(!sourceDoc || !sourceDoc.documentElement) return null;
+const clone = sourceDoc.documentElement.cloneNode(true);
+const sourceFields = sourceDoc.querySelectorAll('textarea,input,select');
+const clonedFields = clone.querySelectorAll('textarea,input,select');
+
+sourceFields.forEach((source, index) => {
+const target = clonedFields[index];
+if(!target) return;
+if(source.tagName === 'TEXTAREA'){
+target.textContent = source.value;
+}else if(source.type === 'checkbox' || source.type === 'radio'){
+if(source.checked) target.setAttribute('checked','checked');
+else target.removeAttribute('checked');
+}else if(source.tagName === 'SELECT'){
+Array.from(target.options).forEach((option, optionIndex) => {
+const selected = source.options[optionIndex] && source.options[optionIndex].selected;
+option.selected = selected;
+if(selected) option.setAttribute('selected','selected');
+else option.removeAttribute('selected');
+});
+}else{
+target.setAttribute('value', source.value);
+}
+});
+
+clone.querySelectorAll('#toast').forEach(element => element.remove());
+return '<!DOCTYPE html>\n' + clone.outerHTML;
+}
+
+function syncOpenedBoardsToState(){
+state.openedWindows.forEach((index, boardWindow) => {
+try{
+if(boardWindow && !boardWindow.closed && boardWindow.document && state.generated[index]){
+const html = snapshotBoardDocument(boardWindow.document);
+if(html) state.generated[index].html = html;
+}
+}catch(error){
+console.warn('Could not sync an opened board before ZIP export.', error);
+}
+});
+}
+
 function packageRecords(){
 const seen = new Set();
 return state.generated.reduce((out, g, i) => {
@@ -1334,6 +1397,7 @@ w.document.write(buildPackageHubHtml(boards));
 w.document.close();
 }
 async function downloadGeneratedPackage(){
+syncOpenedBoardsToState();
 if(typeof JSZip === 'undefined'){
 toast('JSZip did not load');
 return;
