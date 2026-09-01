@@ -1223,6 +1223,7 @@ var actionList=document.getElementById('actList');if(actionList)payload.actionMa
 try{localStorage.setItem(STORAGE_KEY,JSON.stringify(payload));updateActionCounter();if(showToast!==false)toast('Board saved');}catch(error){console.error(error);toast('Could not save board');}
 }
 function restoreSavedState(){
+if(window.__BVA_PACKAGE_SNAPSHOT__){updateActionCounter();document.querySelectorAll('textarea').forEach(autoResize);return;}
 var raw;try{raw=localStorage.getItem(STORAGE_KEY);}catch(error){return;}if(!raw)return;
 try{
 var payload=JSON.parse(raw);
@@ -1485,7 +1486,7 @@ const zip = new JSZip();
 boards.forEach(board => {
 zip.file(board.fileName, board.html);
 });
-zip.file('index.html', buildPackageHubHtml(boards));
+zip.file('index.html', buildPackageHubHtml(boards, { finalSnapshot: true }));
 const blob = await zip.generateAsync({ type:'blob' });
 const url = URL.createObjectURL(blob);
 const link = document.createElement('a');
@@ -1502,7 +1503,13 @@ for(let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
 return btoa(binary);
 }
 
-function buildPackageHubHtml(boards){
+function buildPackageHubHtml(boards, options){
+const finalSnapshot = !!(options && options.finalSnapshot);
+const markBoardSnapshot = html => {
+  const value = String(html || '');
+  if(value.indexOf('__BVA_PACKAGE_SNAPSHOT__') !== -1) return value;
+  return value.replace(/<head(\s[^>]*)?>/i, '$&<script>window.__BVA_PACKAGE_SNAPSHOT__=true;<\/script>');
+};
 const boardFixCss = `
 <style id="bva-package-board-fix">
 html,
@@ -1561,7 +1568,7 @@ const packagePayload = {
     title: board.title,
     subtitle: board.subtitle,
     fileName: board.fileName,
-    htmlBase64: encodeBase64Utf8(board.html)
+    htmlBase64: encodeBase64Utf8(finalSnapshot ? markBoardSnapshot(board.html) : board.html)
   }))
 };
 const packageData = encodeBase64Utf8(JSON.stringify(packagePayload));
@@ -1780,6 +1787,12 @@ flex-shrink:0;
     setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
   }
 
+  function markBoardSnapshot(html){
+    var value = String(html || '');
+    if(value.indexOf('__BVA_PACKAGE_SNAPSHOT__') !== -1) return value;
+    return value.replace(/<head(\s[^>]*)?>/i, '$&<script>window.__BVA_PACKAGE_SNAPSHOT__=true;<\/script>');
+  }
+
   function buildUpdatedIndex(updatedBoards){
     var payload = {
       boards: updatedBoards.map(function(board){
@@ -1787,7 +1800,7 @@ flex-shrink:0;
           title: board.title,
           subtitle: board.subtitle,
           fileName: board.fileName,
-          htmlBase64: encodeBase64Utf8(board.html)
+          htmlBase64: encodeBase64Utf8(markBoardSnapshot(board.html))
         };
       })
     };
