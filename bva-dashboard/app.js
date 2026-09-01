@@ -1,3 +1,4 @@
+
 (function(){
 Chart.register(ChartDataLabels);
 const state = {
@@ -756,7 +757,6 @@ h += '</tr>';
 h += '</tbody></table>';
 return h;
 }
-
 function renderYearTable(rows, benchmarkKey, totalRow, sectionId){
 const drill = sectionId === 'sec-fyplan' || sectionId === 'sec-fyfcst';
 const benchmarkName = benchmarkKey === 'p' ? 'Plan' : 'Forecast';
@@ -799,7 +799,6 @@ h += '</tr>';
 h += '</tbody></table>';
 return h;
 }
-
 function renderDriverBlock(block){
 return `<div class="drv-block ${block.variance < 0 ? 'fav-block':'unfav-block'}" id="blk-${block.id}-wrap">
 <div class="drv-block-inner">
@@ -918,6 +917,7 @@ const rowId = slug(blockId + '-' + Date.now());
 const row = document.createElement('div');
 row.className = 'comment-row';
 row.dataset.dynamic = '1';
+row.dataset.blockId = blockId;
 row.id = rowId + '-row';
 row.innerHTML = `<textarea class="vedit" rows="2" data-persist="comment:${rowId}">${escapeHtml(text)}</textarea><button class="del-btn" data-del-row="${rowId}"><i class="ti ti-trash"></i></button>`;
 const addWrap = input.closest('.inline-add');
@@ -969,23 +969,6 @@ else option.removeAttribute('selected');
 });
 });
 }
-function bindActionRows(){
-document.querySelectorAll('#actList .act-item [data-act-cb]').forEach(cb => {
-cb.addEventListener('change', saveState);
-});
-document.querySelectorAll('#actList .act-item [data-persist]').forEach(el => {
-el.addEventListener('input', () => { autoResize(el); saveState(); });
-});
-document.querySelectorAll('#actList .act-item [data-del-row]').forEach(btn => {
-btn.addEventListener('click', () => {
-const id = btn.dataset.delRow;
-const row = document.getElementById(id + '-row') || document.getElementById(id);
-if(row) row.classList.add('hidden');
-saveState();
-updateActionCounter();
-});
-});
-}
 function saveState(){
 if(!state.model) return;
 syncEditableValues(document);
@@ -993,14 +976,19 @@ const key = storageKey();
 const payload = {
 comments: {},
 actions: {},
-actionMarkup: '',
-hidden: []
+hidden: [],
+dynamicComments: [],
+dynamicActions: []
 };
 document.querySelectorAll('[data-persist]').forEach(el => payload.comments[el.dataset.persist] = el.value);
 document.querySelectorAll('[data-act-cb]').forEach(cb => payload.actions[cb.dataset.actCb] = cb.checked);
 document.querySelectorAll('.hidden[id]').forEach(el => payload.hidden.push(el.id));
-const actionList = document.getElementById('actList');
-if(actionList) payload.actionMarkup = actionList.innerHTML;
+document.querySelectorAll('.comment-row[data-dynamic="1"]').forEach(row => {
+payload.dynamicComments.push({ rowId: row.id.replace(/-row$/,''), blockId: row.dataset.blockId || '' });
+});
+document.querySelectorAll('.act-item[data-dynamic="1"]').forEach(div => {
+payload.dynamicActions.push({ id: div.id });
+});
 localStorage.setItem(key, JSON.stringify(payload));
 updateActionCounter();
 toast('Board saved');
@@ -1010,6 +998,39 @@ const raw = localStorage.getItem(storageKey());
 if(!raw) return;
 try{
 const payload = JSON.parse(raw);
+// Recreate rows the user added manually (Add comment / Add action) before
+// restoring their text, otherwise the querySelector below finds nothing
+// and the row - and its saved text - silently disappears.
+(payload.dynamicComments || []).forEach(entry => {
+if(document.getElementById(entry.rowId + '-row')) return;
+const addInput = document.querySelector(`[data-add-input="${cssEscape(entry.blockId)}"]`);
+if(!addInput) return;
+const addWrap = addInput.closest('.inline-add');
+if(!addWrap || !addWrap.parentNode) return;
+const row = document.createElement('div');
+row.className = 'comment-row';
+row.dataset.dynamic = '1';
+row.dataset.blockId = entry.blockId;
+row.id = entry.rowId + '-row';
+row.innerHTML = `<textarea class="vedit" rows="2" data-persist="comment:${entry.rowId}"></textarea><button class="del-btn" data-del-row="${entry.rowId}"><i class="ti ti-trash"></i></button>`;
+addWrap.parentNode.insertBefore(row, addWrap);
+row.querySelector('[data-del-row]').addEventListener('click', () => { row.classList.add('hidden'); saveState(); });
+row.querySelector('[data-persist]').addEventListener('input', e => { autoResize(e.target); saveState(); });
+});
+(payload.dynamicActions || []).forEach(entry => {
+if(document.getElementById(entry.id)) return;
+const list = document.getElementById('actList');
+if(!list) return;
+const div = document.createElement('div');
+div.className = 'act-item';
+div.dataset.dynamic = '1';
+div.id = entry.id;
+div.innerHTML = `<input type="checkbox" class="act-cb" data-act-cb="${entry.id}"><textarea class="act-text" rows="1" data-persist="action:${entry.id}" placeholder="New action item..."></textarea><button class="del-btn" data-del-row="${entry.id}"><i class="ti ti-trash"></i></button>`;
+list.appendChild(div);
+div.querySelector('[data-act-cb]').addEventListener('change', saveState);
+div.querySelector('[data-del-row]').addEventListener('click', () => { div.classList.add('hidden'); saveState(); updateActionCounter(); });
+div.querySelector('[data-persist]').addEventListener('input', e => { autoResize(e.target); saveState(); });
+});
 Object.entries(payload.comments || {}).forEach(([k,v]) => {
 const el = document.querySelector(`[data-persist="${cssEscape(k)}"]`);
 if(el){ el.value = v; autoResize(el); }
@@ -1018,13 +1039,6 @@ Object.entries(payload.actions || {}).forEach(([k,v]) => {
 const cb = document.querySelector(`[data-act-cb="${cssEscape(k)}"]`);
 if(cb) cb.checked = !!v;
 });
-if(payload.actionMarkup){
-const actionList = document.getElementById('actList');
-if(actionList){
-actionList.innerHTML = payload.actionMarkup;
-bindActionRows();
-}
-}
 (payload.hidden || []).forEach(id => {
 const el = document.getElementById(id);
 if(el) el.classList.add('hidden');
@@ -1037,6 +1051,61 @@ return 'bva:' + slug(state.model.meta.badgeLabel);
 }
 function exportFileBase(){
 return `bva_${slug(state.model.meta.dashboardCode)}_${slug(state.model.meta.fyToken)}_${slug(state.model.meta.monthToken)}`;
+}
+// Reads the persisted payload for `key` out of localStorage and merges it into
+// a standalone board HTML string, WITHOUT needing a live DOM/window for that
+// board. This is what makes "Open Board", "Open Board Package" and "Download
+// ZIP" reflect saved edits even after a board's popup window has been closed -
+// previously those flows only pulled from still-open windows, so any board a
+// user had finished, saved, and closed was silently exported with its
+// original, pre-edit content.
+function mergeStateIntoHtml(html, key){
+if(!key) return html;
+let raw;
+try{ raw = localStorage.getItem(key); }catch(e){ raw = null; }
+if(!raw) return html;
+let payload;
+try{ payload = JSON.parse(raw); }catch(e){ return html; }
+let doc;
+try{ doc = new DOMParser().parseFromString(html, 'text/html'); }catch(e){ return html; }
+(payload.dynamicComments || []).forEach(entry => {
+if(doc.getElementById(entry.rowId + '-row')) return;
+const addInput = doc.querySelector(`[data-add-input="${cssEscape(entry.blockId)}"]`);
+if(!addInput) return;
+const addWrap = addInput.closest('.inline-add');
+if(!addWrap || !addWrap.parentNode) return;
+const row = doc.createElement('div');
+row.className = 'comment-row';
+row.dataset.dynamic = '1';
+row.dataset.blockId = entry.blockId;
+row.id = entry.rowId + '-row';
+row.innerHTML = `<textarea class="vedit" rows="2" data-persist="comment:${entry.rowId}"></textarea><button class="del-btn" data-del-row="${entry.rowId}"><i class="ti ti-trash"></i></button>`;
+addWrap.parentNode.insertBefore(row, addWrap);
+});
+(payload.dynamicActions || []).forEach(entry => {
+if(doc.getElementById(entry.id)) return;
+const list = doc.getElementById('actList');
+if(!list) return;
+const div = doc.createElement('div');
+div.className = 'act-item';
+div.dataset.dynamic = '1';
+div.id = entry.id;
+div.innerHTML = `<input type="checkbox" class="act-cb" data-act-cb="${entry.id}"><textarea class="act-text" rows="1" data-persist="action:${entry.id}" placeholder="New action item..."></textarea><button class="del-btn" data-del-row="${entry.id}"><i class="ti ti-trash"></i></button>`;
+list.appendChild(div);
+});
+Object.entries(payload.comments || {}).forEach(([k,v]) => {
+const el = doc.querySelector(`[data-persist="${cssEscape(k)}"]`);
+if(el) el.textContent = v;
+});
+Object.entries(payload.actions || {}).forEach(([k,v]) => {
+const cb = doc.querySelector(`[data-act-cb="${cssEscape(k)}"]`);
+if(cb){ if(v) cb.setAttribute('checked','checked'); else cb.removeAttribute('checked'); }
+});
+(payload.hidden || []).forEach(id => {
+const el = doc.getElementById(id);
+if(el) el.classList.add('hidden');
+});
+return '<!DOCTYPE html>\n' + doc.documentElement.outerHTML;
 }
 async function fetchInlineCss(){
 try{
@@ -1145,7 +1214,12 @@ const clone = document.documentElement.cloneNode(true);
 if(interactive){
 // Keep interactive controls; only remove things that make no sense in a
 // standalone window (workspace navigation, uploader, batch UI, open drill).
-clone.querySelectorAll('#back-nav, #home-nav, #budget-util-nav, .topbar-actions, #upload-shell, #drill-overlay').forEach(el => el.remove());
+// NOTE: `.topbar-actions` (Save / Download HTML / Download PDF) is deliberately
+// NOT stripped here - this is the interactive export, so those controls must
+// stay usable inside the popup/window. Stripping them was the bug behind
+// "Save works irregularly": the buttons were being removed on export, leaving
+// only the silent per-keystroke autosave with no visible confirmation.
+clone.querySelectorAll('#back-nav, #home-nav, #budget-util-nav, #upload-shell, #drill-overlay').forEach(el => el.remove());
 freezeCanvasesAsImages(clone);
 stripLiveScripts(clone, ['html2canvas', 'jspdf']); // keep PDF libs for in-window export
 inlineCssIntoClone(clone, cssText);
@@ -1163,41 +1237,251 @@ return '<!DOCTYPE html>\n' + clone.outerHTML;
 }
 // Inject the self-contained interactive bootstrap (Save / Download HTML /
 // Download PDF / add comment / add action / delete row+block / nav+scrollspy).
+// Implemented as a real function (interactiveBootstrap) and embedded via
+// .toString() - same trick used for initDrilldown below - so the logic is
+// normal, readable JS instead of a hand-escaped string, which is what let the
+// previous version silently drift out of sync with the app's own saveState/
+// restoreSavedState (e.g. it never learned about dynamicComments/
+// dynamicActions, so manually added rows vanished on export).
 function appendInteractiveScript(clone){
 const script = document.createElement('script');
-script.textContent = buildInteractiveBootstrap(storageKey(), exportFileBase());
+script.textContent = '(' + interactiveBootstrap.toString() + ')(' + JSON.stringify(storageKey()) + ', ' + JSON.stringify(exportFileBase()) + ');';
 const body = clone.querySelector('body');
 if(body) body.appendChild(script);
 }
-// Returns a vanilla, dependency-free IIFE string that re-wires every editable
-// control inside an exported window. STORAGE_KEY / FILE_BASE are baked in so
-// each board window persists to its own localStorage slot.
-function buildInteractiveBootstrap(storageKeyStr, fileBaseStr){
-const KEY = JSON.stringify(storageKeyStr);
-const FILE = JSON.stringify(fileBaseStr);
-return '(function(){\n'
-+ 'var STORAGE_KEY=' + KEY + ',FILE_BASE=' + FILE + ';\n'
-+ 'function slug(s){return String(s||"").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/(^-|-$)/g,"");}\n'
-+ 'function escapeHtml(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}\n'
-+ 'function cssEscape(s){return String(s).replace(/"/g,\'\\"\');}\n'
-+ 'function autoResize(el){if(!el||el.tagName!=="TEXTAREA")return;el.style.height="auto";el.style.height=el.scrollHeight+"px";}\n'
-+ 'function toast(m){var t=document.getElementById("toast");if(!t){t=document.createElement("div");t.id="toast";t.className="toast";document.body.appendChild(t);}t.textContent=m;t.classList.add("show");setTimeout(function(){t.classList.remove("show");},1800);}\n'
-+ 'function updateActionCounter(){var items=Array.prototype.slice.call(document.querySelectorAll(".act-item")).filter(function(el){return !el.classList.contains("hidden");});var done=items.filter(function(el){var cb=el.querySelector(".act-cb");return cb&&cb.checked;}).length;var ctr=document.getElementById("actCtr");if(ctr)ctr.textContent=done+" of "+items.length+" completed";}\n'
-+ 'function bindActionRows(){document.querySelectorAll("#actList .act-item [data-act-cb]").forEach(function(cb){cb.addEventListener("change",function(){saveState(true);});});document.querySelectorAll("#actList .act-item [data-persist]").forEach(function(el){el.addEventListener("input",function(){autoResize(el);saveState(true);});});document.querySelectorAll("#actList .act-item [data-del-row]").forEach(function(btn){btn.addEventListener("click",function(){var id=btn.dataset.delRow;var row=document.getElementById(id+"-row")||document.getElementById(id);if(row)row.classList.add("hidden");saveState(true);updateActionCounter();});});}\n'
-
-+ 'function restoreSavedState(){var raw;try{raw=localStorage.getItem(STORAGE_KEY);}catch(e){}if(!raw)return;try{var p=JSON.parse(raw);Object.keys(p.comments||{}).forEach(function(k){var el=document.querySelector("[data-persist=\\""+cssEscape(k)+"\\"]");if(el){el.value=p.comments[k];autoResize(el);}});Object.keys(p.actions||{}).forEach(function(k){var cb=document.querySelector("[data-act-cb=\\""+cssEscape(k)+"\\"]");if(cb)cb.checked=!!p.actions[k];});if(p.actionMarkup){var list=document.getElementById("actList");if(list){list.innerHTML=p.actionMarkup;bindActionRows();}}(p.hidden||[]).forEach(function(id){var el=document.getElementById(id);if(el)el.classList.add("hidden");});updateActionCounter();}catch(e){}}\n'
-+ 'function addCommentRow(blockId){var input=document.querySelector("[data-add-input=\\""+blockId+"\\"]");var text=input?input.value.trim():"";var rowId=slug(blockId+"-"+Date.now());var row=document.createElement("div");row.className="comment-row";row.dataset.dynamic="1";row.id=rowId+"-row";row.innerHTML="<textarea class=\\"vedit\\" rows=\\"2\\" data-persist=\\"comment:"+rowId+"\\">"+escapeHtml(text)+"</textarea><button class=\\"del-btn\\" data-del-row=\\""+rowId+"\\"><i class=\\"ti ti-trash\\"></i></button>";var addWrap=input.closest(".inline-add");addWrap.parentNode.insertBefore(row,addWrap);var ta=row.querySelector("textarea");ta.addEventListener("input",function(){autoResize(ta);saveState(true);});autoResize(ta);if(input)input.value="";saveState(true);}\n'
-+ 'function addAction(){var list=document.getElementById("actList");if(!list)return;var id="act-"+Date.now();var div=document.createElement("div");div.className="act-item";div.dataset.dynamic="1";div.id=id;div.innerHTML="<input type=\\"checkbox\\" class=\\"act-cb\\" data-act-cb=\\""+id+"\\"><textarea class=\\"act-text\\" rows=\\"1\\" data-persist=\\"action:"+id+"\\" placeholder=\\"New action item...\\"></textarea><button class=\\"del-btn\\" data-del-row=\\""+id+"\\"><i class=\\"ti ti-trash\\"></i></button>";list.appendChild(div);div.querySelector("[data-act-cb]").addEventListener("change",function(){saveState(true);});var ta=div.querySelector("textarea");ta.addEventListener("input",function(){autoResize(ta);saveState(true);});autoResize(ta);updateActionCounter();saveState(true);}\n'
-+ 'function downloadHtml(){try{document.querySelectorAll("textarea").forEach(function(t){t.textContent=t.value;});document.querySelectorAll("input").forEach(function(i){if(i.type==="checkbox"){if(i.checked)i.setAttribute("checked","checked");else i.removeAttribute("checked");}else{i.setAttribute("value",i.value);}});var clone=document.documentElement.cloneNode(true);clone.querySelectorAll("#toast").forEach(function(el){el.remove();});var html="<!DOCTYPE html>\\n"+clone.outerHTML;var blob=new Blob([html],{type:"text/html"});var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=FILE_BASE+".html";a.click();URL.revokeObjectURL(a.href);toast("HTML downloaded");}catch(e){console.error(e);toast("Could not export HTML");}}\n'
-+ 'function downloadPdf(){if(typeof html2canvas==="undefined"||!window.jspdf){toast("PDF libraries did not load");return;}saveState(true);var target=document.querySelector(".main-workspace");if(!target){toast("Could not find dashboard content");return;}var hiddenEls=Array.prototype.slice.call(target.querySelectorAll(".hidden, .del-btn, .del-block, .add-act, .mini-btn, .ghost-btn, .topbar-actions, #back-nav, #home-nav"));var restore=hiddenEls.map(function(el){return [el,el.style.display];});var aside=document.querySelector("aside");var asideDisplay=aside?aside.style.display:null;var prevML=target.style.marginLeft,prevW=target.style.width;toast("Building PDF...");hiddenEls.forEach(function(el){el.style.display="none";});if(aside)aside.style.display="none";target.style.marginLeft="0";target.style.width="100%";setTimeout(function(){html2canvas(target,{scale:2,useCORS:true,backgroundColor:"#f8fafc"}).then(function(canvas){var jsPDF=window.jspdf.jsPDF;var pdf=new jsPDF("p","pt","a4");var pageWidth=pdf.internal.pageSize.getWidth();var pageHeight=pdf.internal.pageSize.getHeight();var ratio=canvas.width/pageWidth;var pageHeightPx=Math.max(1,Math.floor(pageHeight*ratio));var rendered=0,first=true;while(rendered<canvas.height){var sh=Math.min(pageHeightPx,canvas.height-rendered);var sc=document.createElement("canvas");sc.width=canvas.width;sc.height=sh;sc.getContext("2d").drawImage(canvas,0,rendered,canvas.width,sh,0,0,canvas.width,sh);var img=sc.toDataURL("image/jpeg",0.92);if(!first)pdf.addPage();pdf.addImage(img,"JPEG",0,0,pageWidth,sh/ratio);rendered+=sh;first=false;}pdf.save(FILE_BASE+".pdf");toast("PDF downloaded");}).catch(function(e){console.error(e);toast("Could not export PDF");}).then(function(){restore.forEach(function(pr){pr[0].style.display=pr[1];});if(aside)aside.style.display=asideDisplay;target.style.marginLeft=prevML;target.style.width=prevW;});},60);}\n'
-+ 'function navTo(sectionId,el){var t=document.getElementById(sectionId);if(!t)return;var top=t.getBoundingClientRect().top+window.scrollY-20;window.scrollTo({top:top,behavior:"smooth"});document.querySelectorAll("aside nav ul li[data-nav]").forEach(function(li){li.classList.remove("active");});if(el)el.classList.add("active");}\n'
-+ 'function scrollSpy(){var sections=["sec-overview","sec-qplan","sec-qfcst","sec-fyplan","sec-fyfcst","sec-te","sec-hc","sec-actions"];var navItems=document.querySelectorAll("aside nav ul li[data-nav]");var sy=window.scrollY+80;var current=0;sections.forEach(function(id,i){var el=document.getElementById(id);if(el&&el.offsetTop<=sy)current=i;});navItems.forEach(function(li){li.classList.remove("active");});if(navItems[current])navItems[current].classList.add("active");}\n'
-+ 'document.body.addEventListener("click",function(e){var t=e.target;if(!t.closest)return;var dr=t.closest("[data-del-row]");if(dr){var id=dr.dataset.delRow;var row=document.getElementById(id+"-row")||document.getElementById(id);if(row)row.classList.add("hidden");saveState(true);updateActionCounter();return;}var db=t.closest("[data-del-block]");if(db){var w=document.getElementById(db.dataset.delBlock+"-wrap");if(w)w.classList.add("hidden");saveState(true);return;}var ac=t.closest("[data-add-comment]");if(ac){addCommentRow(ac.dataset.addComment);return;}if(t.closest("#add-act")){addAction();return;}if(t.closest("#save-nav")){saveState();return;}if(t.closest("#download-nav")){downloadHtml();return;}if(t.closest("#download-pdf-nav")){downloadPdf();return;}var nav=t.closest("aside nav ul li[data-nav]");if(nav){navTo(nav.dataset.nav,nav);return;}});\n'
-+ 'document.querySelectorAll("[data-persist]").forEach(function(el){el.addEventListener("input",function(){autoResize(el);saveState(true);});});\n'
-+ 'document.querySelectorAll("[data-act-cb]").forEach(function(cb){cb.addEventListener("change",function(){saveState(true);});});\n'
-+ 'window.addEventListener("scroll",scrollSpy,{passive:true});\n'
-+ 'restoreSavedState();updateActionCounter();document.querySelectorAll("textarea").forEach(autoResize);\n'
-+ '})();';
+// Self-contained interactive bootstrap that runs inside an exported/opened
+// board window. Mirrors the main app's saveState/restoreSavedState/
+// addCommentRow/addAction logic (including dynamic-row bookkeeping) so a
+// board opened standalone behaves identically to the one in the main app.
+function interactiveBootstrap(STORAGE_KEY, FILE_BASE){
+function slug(s){ return String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,''); }
+function escapeHtml(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function cssEscape(s){ return String(s).replace(/"/g,'\\"'); }
+function autoResize(el){ if(!el||el.tagName!=='TEXTAREA') return; el.style.height='auto'; el.style.height = el.scrollHeight + 'px'; }
+function toast(m){
+let t = document.getElementById('toast');
+if(!t){ t = document.createElement('div'); t.id='toast'; t.className='toast'; document.body.appendChild(t); }
+t.textContent = m; t.classList.add('show');
+setTimeout(() => t.classList.remove('show'), 1800);
+}
+function updateActionCounter(){
+const items = Array.from(document.querySelectorAll('.act-item')).filter(el => !el.classList.contains('hidden'));
+const done = items.filter(el => { const cb = el.querySelector('.act-cb'); return cb && cb.checked; }).length;
+const ctr = document.getElementById('actCtr');
+if(ctr) ctr.textContent = `${done} of ${items.length} completed`;
+}
+function saveState(silent){
+const p = { comments:{}, actions:{}, hidden:[], dynamicComments:[], dynamicActions:[] };
+document.querySelectorAll('[data-persist]').forEach(el => p.comments[el.dataset.persist] = el.value);
+document.querySelectorAll('[data-act-cb]').forEach(cb => p.actions[cb.dataset.actCb] = cb.checked);
+document.querySelectorAll('.hidden[id]').forEach(el => p.hidden.push(el.id));
+document.querySelectorAll('.comment-row[data-dynamic="1"]').forEach(row => {
+p.dynamicComments.push({ rowId: row.id.replace(/-row$/,''), blockId: row.dataset.blockId || '' });
+});
+document.querySelectorAll('.act-item[data-dynamic="1"]').forEach(div => {
+p.dynamicActions.push({ id: div.id });
+});
+try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(p)); }catch(e){}
+updateActionCounter();
+if(!silent) toast('Board saved');
+}
+function wireCommentRow(row){
+const del = row.querySelector('[data-del-row]');
+if(del) del.addEventListener('click', () => { row.classList.add('hidden'); saveState(true); updateActionCounter(); });
+const ta = row.querySelector('textarea');
+if(ta) ta.addEventListener('input', () => { autoResize(ta); saveState(true); });
+}
+function wireActionItem(div){
+const cb = div.querySelector('[data-act-cb]');
+if(cb) cb.addEventListener('change', () => saveState(true));
+const ta = div.querySelector('textarea');
+if(ta) ta.addEventListener('input', () => { autoResize(ta); saveState(true); });
+const del = div.querySelector('[data-del-row]');
+if(del) del.addEventListener('click', () => { div.classList.add('hidden'); saveState(true); updateActionCounter(); });
+}
+function restoreSavedState(){
+let raw;
+try{ raw = localStorage.getItem(STORAGE_KEY); }catch(e){}
+if(!raw) return;
+try{
+const p = JSON.parse(raw);
+(p.dynamicComments || []).forEach(entry => {
+if(document.getElementById(entry.rowId + '-row')) return;
+const addInput = document.querySelector(`[data-add-input="${cssEscape(entry.blockId)}"]`);
+if(!addInput) return;
+const addWrap = addInput.closest('.inline-add');
+if(!addWrap) return;
+const row = document.createElement('div');
+row.className = 'comment-row';
+row.dataset.dynamic = '1';
+row.dataset.blockId = entry.blockId;
+row.id = entry.rowId + '-row';
+row.innerHTML = `<textarea class="vedit" rows="2" data-persist="comment:${entry.rowId}"></textarea><button class="del-btn" data-del-row="${entry.rowId}"><i class="ti ti-trash"></i></button>`;
+addWrap.parentNode.insertBefore(row, addWrap);
+wireCommentRow(row);
+});
+(p.dynamicActions || []).forEach(entry => {
+if(document.getElementById(entry.id)) return;
+const list = document.getElementById('actList');
+if(!list) return;
+const div = document.createElement('div');
+div.className = 'act-item';
+div.dataset.dynamic = '1';
+div.id = entry.id;
+div.innerHTML = `<input type="checkbox" class="act-cb" data-act-cb="${entry.id}"><textarea class="act-text" rows="1" data-persist="action:${entry.id}" placeholder="New action item..."></textarea><button class="del-btn" data-del-row="${entry.id}"><i class="ti ti-trash"></i></button>`;
+list.appendChild(div);
+wireActionItem(div);
+});
+Object.keys(p.comments || {}).forEach(k => {
+const el = document.querySelector(`[data-persist="${cssEscape(k)}"]`);
+if(el){ el.value = p.comments[k]; autoResize(el); }
+});
+Object.keys(p.actions || {}).forEach(k => {
+const cb = document.querySelector(`[data-act-cb="${cssEscape(k)}"]`);
+if(cb) cb.checked = !!p.actions[k];
+});
+(p.hidden || []).forEach(id => {
+const el = document.getElementById(id);
+if(el) el.classList.add('hidden');
+});
+updateActionCounter();
+}catch(e){}
+}
+function addCommentRow(blockId){
+const input = document.querySelector(`[data-add-input="${blockId}"]`);
+const text = input ? input.value.trim() : '';
+const rowId = slug(blockId + '-' + Date.now());
+const row = document.createElement('div');
+row.className = 'comment-row';
+row.dataset.dynamic = '1';
+row.dataset.blockId = blockId;
+row.id = rowId + '-row';
+row.innerHTML = `<textarea class="vedit" rows="2" data-persist="comment:${rowId}">${escapeHtml(text)}</textarea><button class="del-btn" data-del-row="${rowId}"><i class="ti ti-trash"></i></button>`;
+const addWrap = input.closest('.inline-add');
+addWrap.parentNode.insertBefore(row, addWrap);
+wireCommentRow(row);
+autoResize(row.querySelector('textarea'));
+if(input) input.value = '';
+saveState(true);
+}
+function addAction(){
+const list = document.getElementById('actList');
+if(!list) return;
+const id = 'act-' + Date.now();
+const div = document.createElement('div');
+div.className = 'act-item';
+div.dataset.dynamic = '1';
+div.id = id;
+div.innerHTML = `<input type="checkbox" class="act-cb" data-act-cb="${id}"><textarea class="act-text" rows="1" data-persist="action:${id}" placeholder="New action item..."></textarea><button class="del-btn" data-del-row="${id}"><i class="ti ti-trash"></i></button>`;
+list.appendChild(div);
+wireActionItem(div);
+autoResize(div.querySelector('textarea'));
+updateActionCounter();
+saveState(true);
+}
+function downloadHtml(){
+try{
+document.querySelectorAll('textarea').forEach(t => { t.textContent = t.value; });
+document.querySelectorAll('input').forEach(i => {
+if(i.type === 'checkbox'){ if(i.checked) i.setAttribute('checked','checked'); else i.removeAttribute('checked'); }
+else{ i.setAttribute('value', i.value); }
+});
+const clone = document.documentElement.cloneNode(true);
+clone.querySelectorAll('#toast').forEach(el => el.remove());
+const html = '<!DOCTYPE html>\n' + clone.outerHTML;
+const blob = new Blob([html], { type:'text/html' });
+const a = document.createElement('a');
+a.href = URL.createObjectURL(blob);
+a.download = FILE_BASE + '.html';
+a.click();
+URL.revokeObjectURL(a.href);
+toast('HTML downloaded');
+}catch(e){ console.error(e); toast('Could not export HTML'); }
+}
+function downloadPdf(){
+if(typeof html2canvas === 'undefined' || !window.jspdf){ toast('PDF libraries did not load'); return; }
+saveState(true);
+const target = document.querySelector('.main-workspace');
+if(!target){ toast('Could not find dashboard content'); return; }
+const hiddenEls = Array.from(target.querySelectorAll('.hidden, .del-btn, .del-block, .add-act, .mini-btn, .ghost-btn, .topbar-actions, #back-nav, #home-nav'));
+const restore = hiddenEls.map(el => [el, el.style.display]);
+const aside = document.querySelector('aside');
+const asideDisplay = aside ? aside.style.display : null;
+const prevML = target.style.marginLeft, prevW = target.style.width;
+toast('Building PDF...');
+hiddenEls.forEach(el => { el.style.display = 'none'; });
+if(aside) aside.style.display = 'none';
+target.style.marginLeft = '0';
+target.style.width = '100%';
+setTimeout(() => {
+html2canvas(target, { scale:2, useCORS:true, backgroundColor:'#f8fafc' }).then(canvas => {
+const { jsPDF } = window.jspdf;
+const pdf = new jsPDF('p','pt','a4');
+const pageWidth = pdf.internal.pageSize.getWidth();
+const pageHeight = pdf.internal.pageSize.getHeight();
+const ratio = canvas.width / pageWidth;
+const pageHeightPx = Math.max(1, Math.floor(pageHeight*ratio));
+let rendered = 0, first = true;
+while(rendered < canvas.height){
+const sh = Math.min(pageHeightPx, canvas.height - rendered);
+const sc = document.createElement('canvas');
+sc.width = canvas.width; sc.height = sh;
+sc.getContext('2d').drawImage(canvas, 0, rendered, canvas.width, sh, 0, 0, canvas.width, sh);
+const img = sc.toDataURL('image/jpeg', 0.92);
+if(!first) pdf.addPage();
+pdf.addImage(img, 'JPEG', 0, 0, pageWidth, sh/ratio);
+rendered += sh; first = false;
+}
+pdf.save(FILE_BASE + '.pdf');
+toast('PDF downloaded');
+}).catch(e => { console.error(e); toast('Could not export PDF'); })
+.then(() => {
+restore.forEach(pr => { pr[0].style.display = pr[1]; });
+if(aside) aside.style.display = asideDisplay;
+target.style.marginLeft = prevML;
+target.style.width = prevW;
+});
+}, 60);
+}
+function navTo(sectionId, el){
+const t = document.getElementById(sectionId);
+if(!t) return;
+const top = t.getBoundingClientRect().top + window.scrollY - 20;
+window.scrollTo({ top, behavior:'smooth' });
+document.querySelectorAll('aside nav ul li[data-nav]').forEach(li => li.classList.remove('active'));
+if(el) el.classList.add('active');
+}
+function scrollSpy(){
+const sections = ['sec-overview','sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst','sec-te','sec-hc','sec-actions'];
+const navItems = document.querySelectorAll('aside nav ul li[data-nav]');
+const sy = window.scrollY + 80;
+let current = 0;
+sections.forEach((id,i) => { const el = document.getElementById(id); if(el && el.offsetTop <= sy) current = i; });
+navItems.forEach(li => li.classList.remove('active'));
+if(navItems[current]) navItems[current].classList.add('active');
+}
+document.body.addEventListener('click', e => {
+const t = e.target;
+if(!t.closest) return;
+const dr = t.closest('[data-del-row]');
+if(dr){ const id = dr.dataset.delRow; const row = document.getElementById(id+'-row') || document.getElementById(id); if(row) row.classList.add('hidden'); saveState(true); updateActionCounter(); return; }
+const db = t.closest('[data-del-block]');
+if(db){ const w = document.getElementById(db.dataset.delBlock+'-wrap'); if(w) w.classList.add('hidden'); saveState(true); return; }
+const ac = t.closest('[data-add-comment]');
+if(ac){ addCommentRow(ac.dataset.addComment); return; }
+if(t.closest('#add-act')){ addAction(); return; }
+if(t.closest('#save-nav')){ saveState(); return; }
+if(t.closest('#download-nav')){ downloadHtml(); return; }
+if(t.closest('#download-pdf-nav')){ downloadPdf(); return; }
+const nav = t.closest('aside nav ul li[data-nav]');
+if(nav){ navTo(nav.dataset.nav, nav); return; }
+});
+document.querySelectorAll('[data-persist]').forEach(el => el.addEventListener('input', () => { autoResize(el); saveState(true); }));
+document.querySelectorAll('[data-act-cb]').forEach(cb => cb.addEventListener('change', () => saveState(true)));
+window.addEventListener('scroll', scrollSpy, { passive:true });
+restoreSavedState();
+updateActionCounter();
+document.querySelectorAll('textarea').forEach(autoResize);
 }
 async function downloadHtml(){
 if(!state.model){ toast('Build a dashboard first'); return; }
@@ -1270,6 +1554,7 @@ state.generated.push({
 title: model.meta.dashboardCode,
 subtitle: `${model.meta.monthToken} ${model.meta.fyToken} · ${model.meta.currentQuarterLabel}`,
 fileBase: exportFileBase(),
+storageKey: storageKey(),
 html
 });
 }
@@ -1344,8 +1629,12 @@ if(!g){ toast('Board not found'); return; }
 const w = window.open('', '_blank');
 if(!w){ toast('Pop-up blocked — allow pop-ups and click again'); return; }
 try{
+// Always merge in whatever this board's latest saved state is (localStorage
+// is updated on every keystroke), so reopening a board you already edited
+// and closed shows your work instead of the original template.
+const html = mergeStateIntoHtml(g.html, g.storageKey);
 w.document.open();
-w.document.write(g.html);
+w.document.write(html);
 w.document.close();
 state.openedWindows.set(w, index);
 w.document.title = `${g.title} — ${g.subtitle}`;
@@ -1360,7 +1649,6 @@ if(!sourceDoc || !sourceDoc.documentElement) return null;
 const clone = sourceDoc.documentElement.cloneNode(true);
 const sourceFields = sourceDoc.querySelectorAll('textarea,input,select');
 const clonedFields = clone.querySelectorAll('textarea,input,select');
-
 sourceFields.forEach((source, index) => {
 const target = clonedFields[index];
 if(!target) return;
@@ -1380,11 +1668,9 @@ else option.removeAttribute('selected');
 target.setAttribute('value', source.value);
 }
 });
-
 clone.querySelectorAll('#toast').forEach(element => element.remove());
 return '<!DOCTYPE html>\n' + clone.outerHTML;
 }
-
 function syncOpenedBoardsToState(){
 state.openedWindows.forEach((index, boardWindow) => {
 try{
@@ -1397,7 +1683,6 @@ console.warn('Could not sync an opened board before ZIP export.', error);
 }
 });
 }
-
 function packageRecords(){
 const seen = new Set();
 return state.generated.reduce((out, g, i) => {
@@ -1408,12 +1693,18 @@ out.push({
 title: g.title,
 subtitle: g.subtitle,
 fileName,
-html: g.html
+// Merge in localStorage as a guaranteed final step: syncOpenedBoardsToState
+// only helps for boards whose popup window is still open. Any board the
+// user finished, saved, and closed (the normal workflow) previously fell
+// back to the stale pre-edit snapshot from initial generation - this line
+// is the actual fix for "download loses my changes even though I saved".
+html: mergeStateIntoHtml(g.html, g.storageKey)
 });
 return out;
 }, []);
 }
 function openGeneratedPackage(){
+syncOpenedBoardsToState();
 const boards = packageRecords();
 const w = window.open('', '_blank');
 if(!w){
@@ -1451,7 +1742,6 @@ let binary = '';
 for(let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
 return btoa(binary);
 }
-
 function buildPackageHubHtml(boards){
 const boardFixCss = `
 <style id="bva-package-board-fix">
@@ -1505,7 +1795,6 @@ object-fit:contain!important;
 object-position:center!important;
 }
 </style>`;
-
 const packagePayload = {
   boards: boards.map(board => ({
     title: board.title,
@@ -1515,7 +1804,6 @@ const packagePayload = {
   }))
 };
 const packageData = encodeBase64Utf8(JSON.stringify(packagePayload));
-
 return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1601,7 +1889,6 @@ flex-shrink:0;
     for(var j = 0; j < bytes.length; j++) escaped += '%' + ('00' + bytes[j].toString(16)).slice(-2);
     return decodeURIComponent(escaped);
   }
-
   function readBoards(){
     try{
       var payload = JSON.parse(decodeBase64Utf8(window.__BVA_PACKAGE_DATA__));
@@ -1618,27 +1905,22 @@ flex-shrink:0;
       return [];
     }
   }
-
   var boards = readBoards();
   var tabs = document.getElementById('tabs');
   var frames = document.getElementById('frames');
   var status = document.getElementById('status');
-
   boards.forEach(function(board, index){
     var tab = document.createElement('button');
     tab.className = 'tab';
     tab.textContent = board.title || ('Board ' + (index + 1));
     tabs.appendChild(tab);
-
     var frame = document.createElement('iframe');
     frame.className = 'board-frame';
     frame.dataset.index = index;
     frame.srcdoc = board.html;
     frames.appendChild(frame);
-
     tab.addEventListener('click', function(){ activate(index); });
   });
-
   function activate(index){
     tabs.querySelectorAll('.tab').forEach(function(tab, i){
       tab.classList.toggle('active', i === index);
@@ -1649,7 +1931,6 @@ flex-shrink:0;
     var board = boards[index];
     status.textContent = board ? board.title + ' · ' + board.subtitle : '';
   }
-
   function waitForFrame(frame){
     if(frame.contentDocument && frame.contentDocument.readyState === 'complete'){
       return Promise.resolve();
@@ -1658,19 +1939,15 @@ flex-shrink:0;
       frame.addEventListener('load', resolve, { once:true });
     });
   }
-
   function snapshotFrame(frame){
     var sourceDoc = frame.contentDocument;
     if(!sourceDoc) throw new Error('Could not read board frame');
-
     var clone = sourceDoc.documentElement.cloneNode(true);
     var sourceFields = sourceDoc.querySelectorAll('textarea,input,select');
     var clonedFields = clone.querySelectorAll('textarea,input,select');
-
     sourceFields.forEach(function(source, index){
       var target = clonedFields[index];
       if(!target) return;
-
       if(source.tagName === 'TEXTAREA'){
         target.textContent = source.value;
       }else if(source.type === 'checkbox' || source.type === 'radio'){
@@ -1687,27 +1964,22 @@ flex-shrink:0;
         target.setAttribute('value', source.value);
       }
     });
-
     clone.querySelectorAll('#toast').forEach(function(element){ element.remove(); });
     return '<!DOCTYPE html>\\n' + clone.outerHTML;
   }
-
   function encodeBase64Utf8(value){
     var bytes = new TextEncoder().encode(String(value == null ? '' : value));
     var binary = '';
     for(var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
     return btoa(binary);
   }
-
   async function downloadZip(){
     if(typeof JSZip === 'undefined'){
       alert('JSZip could not be loaded.');
       return;
     }
-
     var frameList = Array.from(frames.querySelectorAll('.board-frame'));
     await Promise.all(frameList.map(waitForFrame));
-
     var currentBoards = frameList.map(function(frame, index){
       return {
         title: boards[index].title,
@@ -1716,11 +1988,9 @@ flex-shrink:0;
         html: snapshotFrame(frame)
       };
     });
-
     var zip = new JSZip();
     currentBoards.forEach(function(board){ zip.file(board.fileName, board.html); });
     zip.file('index.html', buildUpdatedIndex(currentBoards));
-
     var blob = await zip.generateAsync({ type:'blob' });
     var url = URL.createObjectURL(blob);
     var link = document.createElement('a');
@@ -1729,7 +1999,6 @@ flex-shrink:0;
     link.click();
     setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
   }
-
   function buildUpdatedIndex(updatedBoards){
     var payload = {
       boards: updatedBoards.map(function(board){
@@ -1755,7 +2024,6 @@ flex-shrink:0;
     if(clonedStatus) clonedStatus.textContent = '';
     return '<!DOCTYPE html>\\n' + clone.outerHTML;
   }
-
   document.getElementById('download-zip').addEventListener('click', downloadZip);
   if(boards.length) activate(0);
 })();
@@ -1763,7 +2031,6 @@ flex-shrink:0;
 </body>
 </html>`;
 }
-
 async function downloadPdf(){
 if(!state.model){ toast('Build a dashboard first'); return; }
 if(typeof html2canvas === 'undefined' || !window.jspdf){
@@ -2076,9 +2343,9 @@ function render(c){
 ctx=Object.assign({mode:'materiality', threshold:25, search:''}, c);
 var overlay=ensure(), panel=document.getElementById('drill-panel');
 panel.innerHTML=''
-+'<div class="drill-hdr"><div><h3>'+esc(c.title)+'</h3><div class="drill-sub">'+esc(c.periodLabel)+' \u00b7 Working vs '+esc(c.benchmarkLabel)+'</div></div><button class="drill-close" id="drill-close">&times;</button></div>'
++'<div class="drill-hdr"><div><h3>'+esc(c.title)+'</h3><div class="drill-sub">'+esc(c.periodLabel)+' · Working vs '+esc(c.benchmarkLabel)+'</div></div><button class="drill-close" id="drill-close">&times;</button></div>'
 +'<div class="drill-controls"><div class="drill-seg"><button class="drill-seg-btn" data-mode="materiality">By materiality</button><button class="drill-seg-btn" data-mode="activity" title="With Activity (excluding zero)">With activity</button><button class="drill-seg-btn" data-mode="all">Show all</button></div>'
-+'<div class="drill-thr" id="drill-thr-wrap"><span>\u00b1\u00a0$</span><input type="number" id="drill-thr" min="0" step="5" value="'+c.threshold+'" /><span>K</span></div></div>'
++'<div class="drill-thr" id="drill-thr-wrap"><span>± $</span><input type="number" id="drill-thr" min="0" step="5" value="'+c.threshold+'" /><span>K</span></div></div>'
 +'<div class="drill-search" id="drill-search-wrap"><i class="ti ti-search"></i><input type="text" id="drill-search" placeholder="Search vendor by id or name..." /></div>'
 +'<div class="drill-body" id="drill-body"></div>';
 panel.querySelector('#drill-close').addEventListener('click', close);
@@ -2103,8 +2370,8 @@ else { shown=all; var q=(ctx.search||'').trim().toLowerCase(); if(q) shown=shown
 var maxVal=Math.max.apply(null,[1].concat(shown.map(function(v){return Math.max(Math.abs(v.working),Math.abs(v.benchmark));})));
 function bar(v){
 var wPct=Math.min(100,Math.abs(v.working)/maxVal*100), bPct=Math.min(100,Math.abs(v.benchmark)/maxVal*100), over=v.variance>0;
-var vu=v.benchmark?((v.variance>0?'+':'')+Math.round(v.variance/v.benchmark*100)+'%'):(v.working?'not in plan':'\u2014');
-return '<div class="drill-bar-row"><div class="drill-bar-top"><span class="drill-bar-left"><span class="drill-bar-name">'+esc(v.name)+'</span>'+(v.gl?'<button class="drill-gl-btn" type="button" title="Show GL account"><i class="ti ti-eye"></i></button>':'')+'</span><span class="drill-bar-fig">'+fmtKplain(v.working)+' / '+fmtKplain(v.benchmark)+'</span></div><div class="drill-track"><div class="drill-fill '+(over?'unfav':'fav')+'" style="width:'+wPct+'%"></div>'+(v.benchmark?'<div class="drill-plan-marker" style="left:'+bPct+'%"></div>':'')+'</div><div class="drill-util '+(over?'var-unfav':'var-fav')+'">'+esc(vu)+' vs '+esc(ctx.benchmarkLabel.toLowerCase())+' \u00b7 '+fmtK(v.variance)+'</div>'+(v.gl?'<div class="drill-gl-line"><i class="ti ti-receipt-2"></i>GL account \u00b7 '+esc(v.gl)+'</div>':'')+'</div>';
+var vu=v.benchmark?((v.variance>0?'+':'')+Math.round(v.variance/v.benchmark*100)+'%'):(v.working?'not in plan':'—');
+return '<div class="drill-bar-row"><div class="drill-bar-top"><span class="drill-bar-left"><span class="drill-bar-name">'+esc(v.name)+'</span>'+(v.gl?'<button class="drill-gl-btn" type="button" title="Show GL account"><i class="ti ti-eye"></i></button>':'')+'</span><span class="drill-bar-fig">'+fmtKplain(v.working)+' / '+fmtKplain(v.benchmark)+'</span></div><div class="drill-track"><div class="drill-fill '+(over?'unfav':'fav')+'" style="width:'+wPct+'%"></div>'+(v.benchmark?'<div class="drill-plan-marker" style="left:'+bPct+'%"></div>':'')+'</div><div class="drill-util '+(over?'var-unfav':'var-fav')+'">'+esc(vu)+' vs '+esc(ctx.benchmarkLabel.toLowerCase())+' · '+fmtK(v.variance)+'</div>'+(v.gl?'<div class="drill-gl-line"><i class="ti ti-receipt-2"></i>GL account · '+esc(v.gl)+'</div>':'')+'</div>';
 }
 var unfav=shown.filter(function(v){return v.variance>0;}).sort(function(a,b){return b.variance-a.variance;});
 var fav=shown.filter(function(v){return v.variance<0;}).sort(function(a,b){return a.variance-b.variance;});
@@ -2115,10 +2382,10 @@ if(fav.length) bars+=gh('fav','Favorable','Savings',fav.length)+fav.map(bar).joi
 if(unfav.length) bars+=gh('unfav','Unfavorable','Overspend',unfav.length)+unfav.map(bar).join('');
 if(neu.length) bars+=gh('neu','No Variance','In line with Plan',neu.length)+neu.map(bar).join('');
 var ct;
-if(ctx.mode==='materiality') ct='Showing '+shown.length+' of '+all.length+' vendors \u00b7 materiality \u00b1 $'+ctx.threshold+'K';
-else if(ctx.mode==='activity') ct='Showing '+shown.length+' of '+all.length+' vendors \u00b7 with activity (excluding zero)';
-else { var q2=(ctx.search||'').trim(); ct=q2?('Showing '+shown.length+' of '+all.length+' vendors \u00b7 search "'+q2+'"'):('Showing all '+all.length+' vendors'); }
-bd.innerHTML='<div class="drill-summary"><div class="ds"><div class="k">Working</div><div class="val">'+fmtKplain(totW)+'</div></div><div class="ds"><div class="k">'+esc(ctx.benchmarkLabel)+'</div><div class="val">'+fmtKplain(totB)+'</div></div><div class="ds"><div class="k">Variance</div><div class="val '+(totVar<0?'kpi-fav':totVar>0?'kpi-unfav':'kpi-neu')+'">'+fmtK(totVar)+'</div></div><div class="ds"><div class="k">Utilization</div><div class="val">'+(util===null?'\u2014':util+'%')+'</div></div></div><div class="drill-count">'+esc(ct)+'</div>'+(shown.length?bars:('<div class="drill-empty">'+(ctx.mode==='materiality'?'No vendors within this materiality range.':'No vendors to display.')+'</div>'));
+if(ctx.mode==='materiality') ct='Showing '+shown.length+' of '+all.length+' vendors · materiality ± $'+ctx.threshold+'K';
+else if(ctx.mode==='activity') ct='Showing '+shown.length+' of '+all.length+' vendors · with activity (excluding zero)';
+else { var q2=(ctx.search||'').trim(); ct=q2?('Showing '+shown.length+' of '+all.length+' vendors · search "'+q2+'"'):('Showing all '+all.length+' vendors'); }
+bd.innerHTML='<div class="drill-summary"><div class="ds"><div class="k">Working</div><div class="val">'+fmtKplain(totW)+'</div></div><div class="ds"><div class="k">'+esc(ctx.benchmarkLabel)+'</div><div class="val">'+fmtKplain(totB)+'</div></div><div class="ds"><div class="k">Variance</div><div class="val '+(totVar<0?'kpi-fav':totVar>0?'kpi-unfav':'kpi-neu')+'">'+fmtK(totVar)+'</div></div><div class="ds"><div class="k">Utilization</div><div class="val">'+(util===null?'—':util+'%')+'</div></div></div><div class="drill-count">'+esc(ct)+'</div>'+(shown.length?bars:('<div class="drill-empty">'+(ctx.mode==='materiality'?'No vendors within this materiality range.':'No vendors to display.')+'</div>'));
 }
 var container=root||document;
 container.addEventListener('click', function(e){ var t=e.target; if(!t||!t.closest) return; var cell=t.closest('[data-drill="1"]'); if(cell) open(cell); });
@@ -2310,3 +2577,6 @@ function slug(s){ return String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').
 function escapeHtml(str){ return String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function cssEscape(str){ return String(str).replace(/"/g,'\\"'); }
 })();
+ 
+
+
