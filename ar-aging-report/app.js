@@ -2,6 +2,7 @@ function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;')
 
 const arFiles = [null, null]; // [file0, file1]
 
+
 function arDragOver(e, id){ e.preventDefault(); document.getElementById(id).style.borderColor='#1D9E75'; }
 function arDragLeave(id){ document.getElementById(id).style.borderColor='#D3D1C7'; }
 function arDrop(e, idx){
@@ -506,147 +507,74 @@ function arBuildHTML(ctx){
   .btn-copy.error   { border-color: #a32d2d; color: #a32d2d; background: #fdf0f0; }
   .btn-row { display: flex; gap: 8px; align-items: center; }
 
-  /* Editable PowerPoint slide builder */
-  .slide-builder {
-    margin-top: 24px;
-    padding: 16px;
-    border: 1px solid #d9dee7;
-    border-radius: 10px;
-    background: #f7f9fc;
-  }
-  .slide-builder-toolbar {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 14px;
-  }
-  .slide-builder-toolbar h2 { margin: 0; color: #0c2340; font-size: 15px; }
-  .slide-builder-toolbar p { margin: 4px 0 0; color: #6b7a8d; font-size: 11px; }
-  .slide-builder-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-  .slide-builder-btn {
+  /* Create Slide modal */
+  .btn-create-slide {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 7px 11px;
-    border: 1px solid #0c447c;
+    font-size: 11.5px;
+    font-weight: 700;
+    padding: 5px 14px;
     border-radius: 6px;
-    background: #fff;
-    color: #0c447c;
+    border: 1.5px solid #0c447c;
+    background: #0c447c;
+    color: #fff;
     cursor: pointer;
-    font: 600 11px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  }
-  .slide-builder-btn.primary { background: #0c447c; color: #fff; }
-  .slide-builder-btn:hover { filter: brightness(.96); }
-  .slide-builder-btn.success { background: #eaf3de; border-color: #3b6d11; color: #3b6d11; }
-  .slide-builder-btn.error { background: #fdf0f0; border-color: #a32d2d; color: #a32d2d; }
-  .slide-builder-controls {
-    display: grid;
-    grid-template-columns: minmax(0, 1.45fr) 110px minmax(0, 1fr);
-    gap: 12px;
-    align-items: start;
-    margin-bottom: 16px;
-  }
-  .slide-builder-field, .slide-comments-editor { display: grid; gap: 5px; }
-  .slide-builder-field > span, .slide-comments-editor > span {
-    color: #0c2340;
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: .05em;
-  }
-  .slide-builder-field input, .slide-comment-row input {
-    width: 100%;
-    min-height: 31px;
-    padding: 7px 9px;
-    border: 1px solid #cbd5e1;
-    border-radius: 5px;
-    background: #fff;
-    color: #1a1a2e;
-    font: 11px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  }
-  .slide-comment-row { display: flex; gap: 5px; margin-bottom: 5px; }
-  .slide-comment-row input { min-width: 0; }
-  .slide-remove-comment, .slide-add-comment {
-    min-width: 31px;
-    border: 1px solid #cbd5e1;
-    border-radius: 5px;
-    background: #fff;
-    color: #6b7a8d;
-    cursor: pointer;
-    font-weight: 700;
-  }
-  .slide-remove-comment:hover { color: #a32d2d; border-color: #a32d2d; }
-  .slide-add-comment { width: 100%; min-height: 27px; color: #0c447c; font-size: 11px; }
-  .slide-add-comment:hover { background: #e6f1fb; }
-  .slide-stage {
-    width: 100%;
-    aspect-ratio: 16 / 9;
-    overflow: hidden;
-    display: grid;
-    grid-template-columns: minmax(0, 3.25fr) minmax(160px, 1fr);
-    grid-template-rows: auto minmax(0, 1fr) auto;
-    column-gap: 2.7%;
-    row-gap: 2.2%;
-    padding: 3.4% 3.8% 2.1%;
-    background: #fffdfa;
-    color: #213746;
-    border: 1px solid #ebe7dd;
-  }
-  .slide-preview-title {
-    grid-column: 1 / -1;
-    min-height: 1.1em;
-    overflow: hidden;
-    color: #213746;
-    font-family: Georgia, 'Times New Roman', serif;
-    font-size: clamp(20px, 3.25vw, 39px);
-    line-height: 1.05;
-    letter-spacing: -.025em;
     white-space: nowrap;
-    text-overflow: ellipsis;
   }
-  .slide-preview-table { min-width: 0; min-height: 0; overflow: hidden; align-self: stretch; }
-  .slide-preview-table table {
-    width: 100%;
-    height: auto;
-    table-layout: fixed;
-    border-collapse: collapse;
-    font-size: clamp(5px, .66vw, 8px);
-    line-height: 1.05;
+  .btn-create-slide:hover { background: #185fa5; }
+  .ppt-modal { display: none; position: fixed; inset: 0; z-index: 9999; }
+  .ppt-modal.open { display: block; }
+  .ppt-modal-backdrop { position: absolute; inset: 0; background: rgba(12,35,64,.48); }
+  .ppt-modal-card {
+    position: relative;
+    width: min(1100px, calc(100vw - 32px));
+    max-height: calc(100vh - 32px);
+    overflow: auto;
+    margin: 16px auto;
+    padding: 20px;
+    border-radius: 12px;
+    background: #fff;
+    box-shadow: 0 12px 40px rgba(0,0,0,.24);
   }
-  .slide-preview-table th, .slide-preview-table td {
-    padding: 2px 3px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    border: .5px solid #d0d7df;
+  .ppt-modal-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:14px; }
+  .ppt-modal-head h2 { margin:0; color:#0c2340; font-size:18px; }
+  .ppt-modal-head p { margin:4px 0 0; color:#6b7a8d; font-size:11px; }
+  .ppt-modal-close { border:0; background:transparent; color:#6b7a8d; cursor:pointer; font-size:22px; line-height:1; }
+  .ppt-form-grid { display:grid; grid-template-columns:minmax(0,1.5fr) 110px; gap:12px; align-items:start; }
+  .ppt-field { display:grid; gap:5px; }
+  .ppt-field.full { grid-column:1 / -1; }
+  .ppt-field span { color:#0c2340; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
+  .ppt-field input, .ppt-field textarea { width:100%; padding:8px 9px; border:1px solid #cbd5e1; border-radius:5px; background:#fff; color:#1a1a2e; font:12px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+  .ppt-field textarea { min-height:74px; resize:vertical; line-height:1.45; }
+  .ppt-modal-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:14px; }
+  .ppt-modal-btn { border:1px solid #0c447c; border-radius:6px; padding:8px 13px; background:#fff; color:#0c447c; cursor:pointer; font-weight:700; font-size:11px; }
+  .ppt-modal-btn.primary { background:#0c447c; color:#fff; }
+  .ppt-modal-btn:disabled { opacity:.55; cursor:wait; }
+  .ppt-status { min-height:18px; margin-top:9px; color:#0c447c; font-size:11px; }
+  .ppt-status.error { color:#a32d2d; }
+  .ppt-preview {
+    display:grid;
+    grid-template-columns:minmax(0,3.25fr) minmax(160px,1fr);
+    grid-template-rows:auto minmax(0,1fr) auto;
+    column-gap:2.7%; row-gap:2.2%;
+    width:100%; aspect-ratio:16 / 9; overflow:hidden;
+    padding:3.4% 3.8% 2.1%;
+    background:#fffdfa; border:1px solid #ebe7dd;
   }
-  .slide-preview-table th { font-size: clamp(4.5px, .58vw, 7px); }
-  .slide-preview-table td.name { font-size: clamp(4.5px, .58vw, 7px); }
-  .slide-preview-table input { display: none; }
-  .slide-preview-table .flag-icon { display: none; }
-  .slide-preview-comments { min-width: 0; align-self: center; padding-top: 2%; }
-  .slide-preview-comment {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    gap: 9px;
-    margin-bottom: 8%;
-    color: #213746;
-    font-size: clamp(9px, 1.22vw, 15px);
-    line-height: 1.22;
-  }
-  .slide-preview-comment .bullet { color: #b45f2a; font-size: 1.25em; line-height: .9; }
-  .slide-preview-footer {
-    grid-column: 1 / -1;
-    display: flex;
-    align-items: flex-end;
-    justify-content: space-between;
-    color: #53616d;
-    font-size: clamp(6px, .72vw, 9px);
-  }
-  .slide-preview-logo { color: #213746; font-size: clamp(11px, 1.35vw, 17px); font-weight: 500; letter-spacing: .09em; }
-  .slide-preview-confidential { text-align: center; }
-  .slide-preview-number { min-width: 20px; text-align: right; }
+  .ppt-preview-title { grid-column:1 / -1; overflow:hidden; color:#213746; font:clamp(20px,3.25vw,39px)/1.05 Georgia,'Times New Roman',serif; letter-spacing:-.025em; white-space:nowrap; text-overflow:ellipsis; }
+  .ppt-preview-table { min-width:0; min-height:0; overflow:hidden; }
+  .ppt-preview-table table { width:100%; table-layout:fixed; border-collapse:collapse; font-size:clamp(5px,.66vw,8px); line-height:1.05; }
+  .ppt-preview-table th, .ppt-preview-table td { padding:2px 3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; border:.5px solid #d0d7df; }
+  .ppt-preview-table th { font-size:clamp(4.5px,.58vw,7px); }
+  .ppt-preview-table td.name { font-size:clamp(4.5px,.58vw,7px); }
+  .ppt-preview-table input, .ppt-preview-table .flag-icon { display:none; }
+  .ppt-preview-comments { min-width:0; align-self:center; padding-top:2%; }
+  .ppt-preview-comment { display:grid; grid-template-columns:auto minmax(0,1fr); gap:9px; margin-bottom:8%; color:#213746; font-size:clamp(9px,1.22vw,15px); line-height:1.22; }
+  .ppt-preview-comment .bullet { color:#b45f2a; font-size:1.25em; line-height:.9; }
+  .ppt-preview-footer { grid-column:1 / -1; display:flex; align-items:flex-end; justify-content:space-between; color:#53616d; font-size:clamp(6px,.72vw,9px); }
+  .ppt-preview-logo { color:#213746; font-size:clamp(11px,1.35vw,17px); letter-spacing:.09em; }
+  .ppt-preview-number { min-width:20px; text-align:right; }
 
   @media print {
     body { background: #fff; padding: 0; }
@@ -675,6 +603,10 @@ function arBuildHTML(ctx){
         <span class="pill pill-green">Green → ${esc(ctx.greenLabel)} (${esc(ctx.oldRawDate)})</span>
       </div>
       <div class="btn-row">
+        <button class="btn-create-slide" id="btn-create-slide" onclick="openCreateSlide()">
+          <i class="ti ti-presentation"></i>
+          <span>Create slide</span>
+        </button>
         <button class="btn-copy" id="btn-copy" onclick="copyTableAsImage()">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
           <span id="copy-label">Copy as image</span>
@@ -687,58 +619,50 @@ function arBuildHTML(ctx){
     </div>
   </div>
 
-  <section class="slide-builder" id="slide-builder">
-    <div class="slide-builder-toolbar">
-      <div>
-        <h2>PowerPoint slide layout</h2>
-        <p>Edit the title, comments and slide number before copying the 16:9 slide.</p>
-      </div>
-      <div class="slide-builder-actions">
-        <button class="slide-builder-btn primary" id="btn-copy-slide" type="button" onclick="copyPowerPointSlide(false)">
-          <i class="ti ti-copy"></i><span>Copy slide</span>
-        </button>
-        <button class="slide-builder-btn" id="btn-download-slide" type="button" onclick="copyPowerPointSlide(true)">
-          <i class="ti ti-download"></i><span>Download PNG</span>
-        </button>
-      </div>
-    </div>
-
-    <div class="slide-builder-controls">
-      <label class="slide-builder-field">
-        <span>Header</span>
-        <input id="slide-title-input" type="text" value="${esc(reportTitle)}" maxlength="120" />
-      </label>
-
-      <label class="slide-builder-field">
-        <span>Slide #</span>
-        <input id="slide-number-input" type="text" value="33" maxlength="6" />
-      </label>
-
-      <div class="slide-comments-editor" id="slide-comments-editor">
-        <span>Comments / insights</span>
-        <div class="slide-comment-row">
-          <input class="slide-comment-input" type="text" placeholder="Add comment" maxlength="180" />
-          <button class="slide-remove-comment" type="button" title="Remove comment">×</button>
+  <div class="ppt-modal" id="ppt-modal" aria-hidden="true">
+    <div class="ppt-modal-backdrop" onclick="closeCreateSlide()"></div>
+    <div class="ppt-modal-card" role="dialog" aria-modal="true" aria-labelledby="ppt-modal-title">
+      <div class="ppt-modal-head">
+        <div>
+          <h2 id="ppt-modal-title">Create PowerPoint slide</h2>
+          <p>Edit the slide content, preview the layout, then download the editable PPTX.</p>
         </div>
-        <div class="slide-comment-row">
-          <input class="slide-comment-input" type="text" placeholder="Add comment" maxlength="180" />
-          <button class="slide-remove-comment" type="button" title="Remove comment">×</button>
-        </div>
-        <button class="slide-add-comment" id="slide-add-comment" type="button">+ Add comment</button>
+        <button class="ppt-modal-close" type="button" onclick="closeCreateSlide()" aria-label="Close">×</button>
       </div>
-    </div>
 
-    <div class="slide-stage" id="slide-stage">
-      <div class="slide-preview-title" id="slide-preview-title"></div>
-      <div class="slide-preview-table" id="slide-preview-table"></div>
-      <div class="slide-preview-comments" id="slide-preview-comments"></div>
-      <div class="slide-preview-footer">
-        <span class="slide-preview-logo">◈ KOMODO</span>
-        <span class="slide-preview-confidential">Komodo Health, Inc. – Proprietary and Confidential</span>
-        <span class="slide-preview-number" id="slide-preview-number">33</span>
+      <div class="ppt-form-grid">
+        <label class="ppt-field">
+          <span>Header</span>
+          <input id="ppt-title-input" type="text" value="${esc(reportTitle)}" maxlength="120" />
+        </label>
+        <label class="ppt-field">
+          <span>Slide #</span>
+          <input id="ppt-number-input" type="text" value="33" maxlength="6" />
+        </label>
+        <label class="ppt-field full">
+          <span>Comments / insights — one per line</span>
+          <textarea id="ppt-comments-input" placeholder="Add the comments that should appear on the right side of the slide"></textarea>
+        </label>
+      </div>
+
+      <div class="ppt-preview" id="ppt-preview">
+        <div class="ppt-preview-title" id="ppt-preview-title"></div>
+        <div class="ppt-preview-table" id="ppt-preview-table"></div>
+        <div class="ppt-preview-comments" id="ppt-preview-comments"></div>
+        <div class="ppt-preview-footer">
+          <span class="ppt-preview-logo">◈ KOMODO</span>
+          <span>Komodo Health, Inc. – Proprietary and Confidential</span>
+          <span class="ppt-preview-number" id="ppt-preview-number">33</span>
+        </div>
+      </div>
+
+      <div class="ppt-status" id="ppt-status"></div>
+      <div class="ppt-modal-actions">
+        <button class="ppt-modal-btn" type="button" onclick="closeCreateSlide()">Cancel</button>
+        <button class="ppt-modal-btn primary" id="ppt-generate-btn" type="button" onclick="generateAndDownloadPowerPoint()">Generate &amp; download PPTX</button>
       </div>
     </div>
-  </section>
+  </div>
 
   <div class="table-wrap">
     <table>
@@ -989,137 +913,214 @@ function render() {
 function arSlideTableHTML() {
   const source = document.querySelector('.table-wrap table');
   if (!source) return '';
-
   const clone = source.cloneNode(true);
   clone.querySelectorAll('input.cell-edit').forEach(input => {
-    const value = input.value && input.value.trim() ? input.value.trim() : '-';
     const span = document.createElement('span');
-    span.textContent = value;
+    span.textContent = input.value && input.value.trim() ? input.value.trim() : '-';
     input.replaceWith(span);
   });
+  clone.querySelectorAll('.flag-icon').forEach(icon => icon.remove());
   clone.querySelectorAll('[id]').forEach(el => el.removeAttribute('id'));
   return clone.outerHTML;
 }
 
-function arRenderSlidePreview() {
-  const titleInput = document.getElementById('slide-title-input');
-  const numberInput = document.getElementById('slide-number-input');
-  const title = titleInput && titleInput.value.trim() ? titleInput.value.trim() : 'A/R Aging Report';
+function arGetSlideComments() {
+  const input = document.getElementById('ppt-comments-input');
+  if (!input) return [];
+  return input.value.split(/\\r?\\n/).map(v => v.trim()).filter(Boolean);
+}
 
-  const titleTarget = document.getElementById('slide-preview-title');
-  const tableTarget = document.getElementById('slide-preview-table');
-  const commentsTarget = document.getElementById('slide-preview-comments');
-  const numberTarget = document.getElementById('slide-preview-number');
+function arRenderCreateSlidePreview() {
+  const titleInput = document.getElementById('ppt-title-input');
+  const numberInput = document.getElementById('ppt-number-input');
+  const titleTarget = document.getElementById('ppt-preview-title');
+  const numberTarget = document.getElementById('ppt-preview-number');
+  const tableTarget = document.getElementById('ppt-preview-table');
+  const commentsTarget = document.getElementById('ppt-preview-comments');
+  if (!titleTarget || !numberTarget || !tableTarget || !commentsTarget) return;
 
-  if (!titleTarget || !tableTarget || !commentsTarget || !numberTarget) return;
-
-  titleTarget.textContent = title;
+  titleTarget.textContent = titleInput && titleInput.value.trim() ? titleInput.value.trim() : 'A/R Aging Report';
   numberTarget.textContent = numberInput && numberInput.value.trim() ? numberInput.value.trim() : '33';
   tableTarget.innerHTML = arSlideTableHTML();
-
-  const comments = Array.from(document.querySelectorAll('.slide-comment-input'))
-    .map(input => input.value.trim())
-    .filter(Boolean);
-
-  commentsTarget.innerHTML = comments.map(comment =>
-    '<div class="slide-preview-comment">' +
-      '<span class="bullet">•</span>' +
-      '<span>' + esc(comment) + '</span>' +
-    '</div>'
+  commentsTarget.innerHTML = arGetSlideComments().map(comment =>
+    '<div class="ppt-preview-comment"><span class="bullet">•</span><span>' + esc(comment) + '</span></div>'
   ).join('');
 }
 
-function arInitSlideBuilder() {
-  const titleInput = document.getElementById('slide-title-input');
-  const numberInput = document.getElementById('slide-number-input');
-  const commentsEditor = document.getElementById('slide-comments-editor');
-  const addComment = document.getElementById('slide-add-comment');
-
-  if (!titleInput || !numberInput || !commentsEditor || !addComment) return;
-
-  titleInput.addEventListener('input', arRenderSlidePreview);
-  numberInput.addEventListener('input', arRenderSlidePreview);
-  commentsEditor.addEventListener('input', arRenderSlidePreview);
-
-  commentsEditor.addEventListener('click', event => {
-    const removeButton = event.target.closest('.slide-remove-comment');
-    if (!removeButton) return;
-    const row = removeButton.closest('.slide-comment-row');
-    if (row) row.remove();
-    arRenderSlidePreview();
-  });
-
-  addComment.addEventListener('click', () => {
-    const row = document.createElement('div');
-    row.className = 'slide-comment-row';
-    row.innerHTML =
-      '<input class="slide-comment-input" type="text" placeholder="Add comment" maxlength="180" />' +
-      '<button class="slide-remove-comment" type="button" title="Remove comment">×</button>';
-    commentsEditor.insertBefore(row, addComment);
-    row.querySelector('input').focus();
-    arRenderSlidePreview();
+function arInitCreateSlide() {
+  ['ppt-title-input', 'ppt-number-input', 'ppt-comments-input'].forEach(id => {
+    const input = document.getElementById(id);
+    if (input) input.addEventListener('input', arRenderCreateSlidePreview);
   });
 }
 
-async function copyPowerPointSlide(downloadOnly) {
-  const copyButton = document.getElementById('btn-copy-slide');
-  const downloadButton = document.getElementById('btn-download-slide');
-  const button = downloadOnly ? downloadButton : copyButton;
-  const originalLabel = button ? button.innerHTML : '';
-  const stage = document.getElementById('slide-stage');
+function openCreateSlide() {
+  const modal = document.getElementById('ppt-modal');
+  if (!modal) return;
+  modal.classList.add('open');
+  modal.setAttribute('aria-hidden', 'false');
+  const status = document.getElementById('ppt-status');
+  if (status) { status.textContent = ''; status.className = 'ppt-status'; }
+  arRenderCreateSlidePreview();
+  const titleInput = document.getElementById('ppt-title-input');
+  if (titleInput) titleInput.focus();
+}
 
-  if (!stage) return;
-  if (button) {
-    button.disabled = true;
-    button.innerHTML = '<i class="ti ti-loader-2"></i><span>Preparing...</span>';
-  }
+function closeCreateSlide() {
+  const modal = document.getElementById('ppt-modal');
+  if (!modal) return;
+  modal.classList.remove('open');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+async function arEnsurePptxGenJS() {
+  if (window.PptxGenJS) return;
+  await new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js';
+    script.onload = resolve;
+    script.onerror = () => reject(new Error('Could not load the PowerPoint generator library.'));
+    document.head.appendChild(script);
+  });
+}
+
+function arExpandPptxRow(tr) {
+  const cells = [];
+  Array.from(tr.children).forEach(cell => {
+    const colspan = parseInt(cell.getAttribute('colspan') || '1', 10);
+    for (let i = 0; i < colspan; i++) cells.push(i === 0 ? cell : null);
+  });
+  if (cells.length < 13) cells.unshift(null);
+  while (cells.length < 13) cells.push(null);
+  return cells.slice(0, 13);
+}
+
+function arPptxCellText(cell) {
+  if (!cell) return '';
+  const copy = cell.cloneNode(true);
+  copy.querySelectorAll('.flag-icon').forEach(icon => icon.remove());
+  const input = copy.querySelector('input.cell-edit');
+  if (input) return input.value && input.value.trim() ? input.value.trim() : '-';
+  return (copy.textContent || '').replace(/\\s+/g, ' ').trim();
+}
+
+function arPptxCell(cell, colIndex, isHeader) {
+  const classes = cell ? String(cell.className || '') : '';
+  let color = '1A1A2E';
+  let fill = 'FFFFFF';
+  let bold = false;
+  if (classes.includes('grp-may')) { fill = '0C447C'; color = 'B5D4F4'; }
+  if (classes.includes('grp-apr')) { fill = '3B6D11'; color = 'C0DD97'; }
+  if (classes.includes('grp-var')) { fill = '854F0B'; color = 'FAC775'; }
+  if (classes.includes('total-row') || (cell && cell.parentElement.classList.contains('total-row'))) { fill = 'F0F4F8'; bold = true; }
+  if (classes.includes('pct-row') || (cell && cell.parentElement.classList.contains('pct-row'))) { fill = 'FAFBFC'; color = '6B7A8D'; }
+  if (classes.includes('pos-var')) { color = 'A32D2D'; bold = true; }
+  if (classes.includes('neg-var')) { color = '27670A'; bold = true; }
+  if (classes.includes('zero')) { color = 'B0BCC8'; }
+  if (classes.includes('spacer')) fill = 'F5F6F8';
+  return {
+    text: arPptxCellText(cell),
+    options: {
+      color,
+      fill,
+      bold: isHeader || bold,
+      align: colIndex === 0 ? 'left' : 'right',
+      valign: 'mid',
+      margin: 0.025,
+      fontFace: 'Arial',
+      fontSize: isHeader ? 5.4 : 5.2
+    }
+  };
+}
+
+function arBuildPptxRows() {
+  const table = document.querySelector('.table-wrap table');
+  if (!table) return [];
+  const rows = [];
+  table.querySelectorAll('thead tr').forEach((tr, rowIndex) => {
+    arExpandPptxRow(tr).forEach((cell, colIndex) => {
+      if (!rows[rowIndex]) rows[rowIndex] = [];
+      rows[rowIndex].push(arPptxCell(cell, colIndex, true));
+    });
+  });
+  const bodyRows = Array.from(table.querySelectorAll('tbody#tb tr'));
+  bodyRows.forEach(tr => {
+    const row = arExpandPptxRow(tr).map((cell, colIndex) => arPptxCell(cell, colIndex, false));
+    rows.push(row);
+  });
+  return rows;
+}
+
+function arBuildPowerPoint() {
+  const pptx = new PptxGenJS();
+  pptx.layout = 'LAYOUT_WIDE';
+  pptx.author = 'Komodo Health';
+  pptx.company = 'Komodo Health';
+  pptx.subject = 'A/R Aging Report';
+  pptx.title = document.getElementById('ppt-title-input').value.trim() || 'A/R Aging Report';
+  pptx.lang = 'en-US';
+
+  const slide = pptx.addSlide();
+  slide.background = { color: 'FFFDFA' };
+  const title = document.getElementById('ppt-title-input').value.trim() || 'A/R Aging Report';
+  const slideNumber = document.getElementById('ppt-number-input').value.trim() || '33';
+  const comments = arGetSlideComments();
+
+  slide.addText(title, {
+    x: 0.5, y: 0.23, w: 12.25, h: 0.5,
+    fontFace: 'Georgia', fontSize: 25, color: '213746',
+    margin: 0, breakLine: false, fit: 'shrink'
+  });
+
+  slide.addTable(arBuildPptxRows(), {
+    x: 0.52, y: 1.03, w: 9.25, h: 5.45,
+    colW: [1.48, .64, .62, .62, .62, .62, .72, .76, .62, .62, .72, .78, .78],
+    rowH: 0.215,
+    border: { type: 'solid', color: 'D0D7DF', pt: 0.45 },
+    fontFace: 'Arial', fontSize: 5.2,
+    margin: 0.025, valign: 'mid', autoFit: false,
+    color: '1A1A2E'
+  });
+
+  comments.forEach((comment, index) => {
+    slide.addText('•', { x: 10.15, y: 1.48 + index * 0.73, w: 0.18, h: 0.22, fontFace: 'Arial', fontSize: 15, color: 'B45F2A', margin: 0 });
+    slide.addText(comment, { x: 10.38, y: 1.45 + index * 0.73, w: 2.35, h: 0.55, fontFace: 'Arial', fontSize: 12.5, color: '213746', breakLine: false, fit: 'shrink', margin: 0 });
+  });
+
+  slide.addText('◈ KOMODO', { x: 0.52, y: 7.05, w: 1.4, h: 0.18, fontFace: 'Arial', fontSize: 11, color: '213746', margin: 0, charSpacing: 1.2 });
+  slide.addText('Komodo Health, Inc. – Proprietary and Confidential', { x: 4.6, y: 7.08, w: 4.2, h: 0.12, fontFace: 'Arial', fontSize: 6.5, color: '53616D', align: 'center', margin: 0 });
+  slide.addText(slideNumber, { x: 12.35, y: 7.08, w: 0.42, h: 0.12, fontFace: 'Arial', fontSize: 7, color: '53616D', align: 'right', margin: 0 });
+  return pptx;
+}
+
+async function generateAndDownloadPowerPoint() {
+  const button = document.getElementById('ppt-generate-btn');
+  const status = document.getElementById('ppt-status');
+  button.disabled = true;
+  status.className = 'ppt-status';
+  status.textContent = 'Generating editable PPTX...';
 
   try {
-    arRenderSlidePreview();
-    const canvas = await html2canvas(stage, {
-      scale: 2,
-      backgroundColor: '#fffdfa',
-      useCORS: true,
-      logging: false
-    });
-    const filename = ${escJs(ctx.outName.replace(/\.html$/i, '_PowerPoint_Slide.png'))};
+    await arEnsurePptxGenJS();
+    const pptx = arBuildPowerPoint();
+    const title = document.getElementById('ppt-title-input').value.trim() || 'AR_Aging_Slide';
+    const slideNumber = document.getElementById('ppt-number-input').value.trim() || '33';
+    const safeName = title.replace(/[^a-z0-9._-]+/gi, '_').replace(/^_+|_+$/g, '').slice(0, 90) || 'AR_Aging_Slide';
+    const fileName = safeName + '_Slide_' + slideNumber + '.pptx';
 
-    if (!downloadOnly && navigator.clipboard && window.ClipboardItem) {
-      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
-      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-      if (button) {
-        button.classList.add('success');
-        button.innerHTML = '<i class="ti ti-check"></i><span>Copied — paste in PowerPoint</span>';
-      }
-    } else {
-      const link = document.createElement('a');
-      link.download = filename;
-      link.href = canvas.toDataURL('image/png');
-      link.click();
-      if (button) {
-        button.classList.add('success');
-        button.innerHTML = '<i class="ti ti-check"></i><span>Downloaded PNG</span>';
-      }
-    }
+    status.textContent = 'Downloading PPTX...';
+    await pptx.writeFile({ fileName });
+    status.textContent = 'PPTX downloaded successfully.';
   } catch (error) {
     console.error(error);
-    if (button) {
-      button.classList.add('error');
-      button.innerHTML = '<i class="ti ti-alert-circle"></i><span>Could not export</span>';
-    }
-  }
-
-  setTimeout(() => {
-    if (!button) return;
-    button.classList.remove('success', 'error');
-    button.innerHTML = originalLabel;
+    status.textContent = 'Could not create the PPTX: ' + error.message;
+    status.className = 'ppt-status error';
+  } finally {
     button.disabled = false;
-  }, 3000);
+  }
 }
-
 render();
-arInitSlideBuilder();
-arRenderSlidePreview();
+arInitCreateSlide();
 
 async function copyTableAsImage() {
   const btn   = document.getElementById('btn-copy');
