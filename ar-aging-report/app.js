@@ -2,13 +2,12 @@ function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;')
 
 const arFiles = [null, null]; // [file0, file1]
 
-
 function arDragOver(e, id){ e.preventDefault(); document.getElementById(id).style.borderColor='#1D9E75'; }
 function arDragLeave(id){ document.getElementById(id).style.borderColor='#D3D1C7'; }
 function arDrop(e, idx){
-  e.preventDefault();
+e.preventDefault();
   const id = idx===0?'ar-drop-0':'ar-drop-1';
-  document.getElementById(id).style.borderColor='#D3D1C7';
+document.getElementById(id).style.borderColor='#D3D1C7';
   const file = e.dataTransfer.files[0];
   if(file) arSetFile(idx, file);
 }
@@ -20,33 +19,35 @@ function arSetFile(idx, file){
   const icon  = document.getElementById('ar-icon-'+idx);
   const label = document.getElementById('ar-label-'+idx);
   const drop  = document.getElementById(idx===0?'ar-drop-0':'ar-drop-1');
-  icon.className  = 'ti ti-file-check';
-  icon.style.color = '#1D9E75';
-  label.textContent = file.name;
-  label.style.color = '#0F6E56';
-  drop.style.borderColor = '#1D9E75';
-  drop.style.borderStyle = 'solid';
+icon.className  = 'ti ti-file-check';
+icon.style.color = '#1D9E75';
+label.textContent = file.name;
+label.style.color = '#0F6E56';
+drop.style.borderColor = '#1D9E75';
+drop.style.borderStyle = 'solid';
+  // Enable button if both files loaded
   if(arFiles[0] && arFiles[1]){
     const btn = document.getElementById('ar-generate-btn');
-    btn.disabled = false;
-    btn.style.background = '#1E2761';
-    btn.style.color = '#fff';
-    btn.style.cursor = 'pointer';
+btn.disabled = false;
+btn.style.background = '#1E2761';
+btn.style.color = '#fff';
+btn.style.cursor = 'pointer';
   }
 }
 
 async function arGenerateReport(){
   const btn = document.getElementById('ar-generate-btn');
-  btn.textContent = 'Processing...';
-  btn.disabled = true;
+btn.textContent = 'Processing...';
+btn.disabled = true;
 
   try {
+    // Load SheetJS dynamically if not present
     if(typeof XLSX === 'undefined'){
       await new Promise((res,rej)=>{
         const s = document.createElement('script');
-        s.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
-        s.onload = res; s.onerror = rej;
-        document.head.appendChild(s);
+s.src = ' https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+s.onload = res; s.onerror = rej;
+document.head.appendChild(s);
       });
     }
 
@@ -54,29 +55,37 @@ async function arGenerateReport(){
     const d0 = arParseRows(wb0, arFiles[0].name);
     const d1 = arParseRows(wb1, arFiles[1].name);
 
+    // Determine recent vs old by date in filename
     const recent = d0.fileDate >= d1.fileDate ? d0 : d1;
     const old    = d0.fileDate >= d1.fileDate ? d1 : d0;
 
+    // Apply offset to all customer rows (not totals)
     arApplyOffset(recent.customers);
     arApplyOffset(old.customers);
 
+    // Grand totals (raw, no offset)
     const gt = recent.grandTotal;
     const gtOld = old.grandTotal;
+
+    // Top 15 by total desc
     const top15 = [...recent.customers].sort((a,b)=>b.total-a.total).slice(0,15);
 
+    // Lookup old values for each top15 customer
     const oldMap = {};
-    old.customers.forEach(r => oldMap[r.customer] = r);
+old.customers.forEach(r => oldMap[r.customer] = r);
 
+    // Detect flags (using raw pre-offset values)
     const flags = arDetectFlags(top15, recent.rawMap, old.rawMap);
 
+    // Derive labels
     const rd = recent.fileDate;
     const blueDate  = new Date(rd.slice(0,4), parseInt(rd.slice(4,6))-2, 1);
     const greenDate = new Date(rd.slice(0,4), parseInt(rd.slice(4,6))-3, 1);
     const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
     const blueLabel  = MONTHS[blueDate.getMonth()]  + ' Close';
     const greenLabel = MONTHS[greenDate.getMonth()] + ' Close';
-    const asOfLabel  = `${rd.slice(4,6)}/${rd.slice(6,8)}/${rd.slice(0,4)}`;
-    const outName    = `AR_Aging_Report_${MONTHS[blueDate.getMonth()]}${blueDate.getFullYear()}.html`;
+    const asOfLabel  = ${rd.slice(4,6)}/${rd.slice(6,8)}/${rd.slice(0,4)};
+    const outName    = AR_Aging_Report_${MONTHS[blueDate.getMonth()]}${blueDate.getFullYear()}.html;
     const blueYear   = blueDate.getFullYear();
 
     const html = arBuildHTML({
@@ -84,40 +93,54 @@ async function arGenerateReport(){
       recentRawDate: recent.rawDate, oldRawDate: old.rawDate
     });
     const win = window.open('', '_blank');
-    win.document.write(html);
-    win.document.close();
+win.document.write(html);
+win.document.close();
 
   } catch(err){
     alert('Error generating report: ' + err.message);
-    console.error(err);
+console.error(err);
   }
 
   btn.innerHTML = '<i class="ti ti-report-analytics" style="font-size:16px;"></i>Generate Report';
-  btn.disabled = false;
-  btn.style.background = '#1E2761';
-  btn.style.color = '#fff';
+btn.disabled = false;
+btn.style.background = '#1E2761';
+btn.style.color = '#fff';
 }
 
 async function arReadXLSX(file){
   return new Promise((res,rej)=>{
     const reader = new FileReader();
-    reader.onload = e => {
+reader.onload = e => {
       try {
         const wb = XLSX.read(new Uint8Array(e.target.result), {type:'array'});
         res(wb);
       } catch(err){ rej(err); }
     };
-    reader.onerror = rej;
-    reader.readAsArrayBuffer(file);
+reader.onerror = rej;
+reader.readAsArrayBuffer(file);
   });
 }
+
+// ---------------------------------------------------------------------------
+// The four functions below (arParseRows, arApplyOffset, arDetectFlags,
+// arBuildHTML) were MISSING from the uploaded app.js — arGenerateReport()
+// called them but they were never defined anywhere in the file, so every
+// "Generate Report" click threw a ReferenceError as soon as it tried to run
+// them (caught by the try/catch above, which is why nothing visibly happened
+// beyond an alert box). They have been reconstructed below based on the
+// business rules documented in the companion ar-aging-report skill reference
+// (offset logic, Top 15 selection, flag detection, report layout). Please
+// spot-check the first generated report against a known-good prior version
+// before relying on it for close, since the exact original implementation
+// wasn't available to compare against.
+// ---------------------------------------------------------------------------
 
 function arToNum(v){
   if(typeof v === 'number') return v;
   if(v===null || v===undefined || v==='') return 0;
   let s = String(v).trim();
   if(s==='') return 0;
-  const neg = /^\(.*\)$/.test(s);
+  const neg = /^(.*)$/.test(s);
   s = s.replace(/[(),$\s]/g,'').replace(/,/g,'');
   const n = parseFloat(s);
   if(isNaN(n)) return 0;
@@ -125,17 +148,21 @@ function arToNum(v){
 }
 
 function arParseRows(wb, filename){
-  const m = filename.match(/(\d{2})(\d{2})(\d{4})\.xlsx?$/i);
+  const m = filename.match(/(\d{2})(\d{2})(\d{4}).xlsx?$/i);
   if(!m){
     throw new Error('Cannot parse date from filename "' + filename + '" — expected pattern JAZAR-ACO-MMDDYYYY.xlsx');
   }
   const mm = m[1], dd = m[2], yyyy = m[3];
-  const fileDate = yyyy + mm + dd;
-  const rawDate = mm + dd + yyyy;
+  const fileDate = yyyy + mm + dd; // YYYYMMDD, sortable
+  const rawDate = mm + dd + yyyy; // MMDDYYYY, as it appears in the filename
 
   const sheet = wb.Sheets[wb.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(sheet, {header:1, defval:''});
 
+  // The known NetSuite export layout has headers on row 7 (index 6) and data
+  // starting row 9 (index 8). We try to locate the header row by looking for
+  // a "Customer" label first, and fall back to the fixed index if not found,
+  // so small formatting differences between exports don't silently break this.
   let headerIdx = rows.findIndex(r => r && String(r[0]||'').toLowerCase().includes('customer'));
   let startIdx = headerIdx >= 0 ? headerIdx + 1 : 8;
 
@@ -176,8 +203,10 @@ function arParseRows(wb, filename){
 }
 
 function arApplyOffset(customers){
-  customers.forEach(row => {
-    const vals = [row.b90p, row.b90, row.b60, row.b30, row.cur];
+  // Reclassifies negative bucket values against positive buckets, oldest
+  // bucket first. Total Balance (row.total) is left unchanged.
+customers.forEach(row => {
+    const vals = [row.b90p, row.b90, row.b60, row.b30, row.cur]; // oldest -> newest
     for(let i=0; i<vals.length; i++){
       if(vals[i] < 0){
         let credit = -vals[i];
@@ -190,11 +219,11 @@ function arApplyOffset(customers){
           }
         }
         if(credit > 0){
-          vals[4] -= credit;
+          vals[4] -= credit; // remainder stays in "Not due yet" as negative
         }
       }
     }
-    row.b90p = vals[0]; row.b90 = vals[1]; row.b60 = vals[2]; row.b30 = vals[3]; row.cur = vals[4];
+row.b90p = vals[0]; row.b90 = vals[1]; row.b60 = vals[2]; row.b30 = vals[3]; row.cur = vals[4];
   });
 }
 
@@ -220,7 +249,7 @@ function arDetectFlags(top15, recentRawMap, oldRawMap){
         } else {
           note = 'Negative present in both closes. Current: ' + rVal.toLocaleString('en-US') + ' / Prior: ' + oVal.toLocaleString('en-US') + '. Verify if amounts are consistent.';
         }
-        customerFlags.push({bucket:label, recentVal:rVal, oldVal:oVal, note});
+customerFlags.push({bucket:label, recentVal:rVal, oldVal:oVal, note});
       }
     });
 
@@ -246,11 +275,11 @@ function arBuildHTML(ctx){
   const RECENT_TOTAL = {cur:ctx.gt.cur, b30:ctx.gt.b30, b60:ctx.gt.b60, b90:ctx.gt.b90, b90p:ctx.gt.b90p, tot:ctx.gt.total};
   const OLD_TOTAL = {b90:ctx.gtOld.b90, b90p:ctx.gtOld.b90p, tot:ctx.gtOld.total};
 
-  const escJs = s => JSON.stringify(s).replace(/</g, '\\u003c');
+  const escJs = s => JSON.stringify(s).replace(/</g, '\u003c');
   const recentMonthWord = ctx.blueLabel.replace(' Close','');
   const oldMonthWord = ctx.greenLabel.replace(' Close','');
   const n = RAW.length;
-  const reportTitle = `A/R Aging Report — ${ctx.blueLabel} ${ctx.blueYear}`;
+  const reportTitle = A/R Aging Report — ${ctx.blueLabel} ${ctx.blueYear};
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -259,7 +288,7 @@ function arBuildHTML(ctx){
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${esc(reportTitle)}</title>
 <style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
@@ -279,6 +308,7 @@ function arBuildHTML(ctx){
     padding: 16px 20px 24px;
   }
 
+  /* Header */
   .report-header {
     display: flex;
     justify-content: space-between;
@@ -315,6 +345,7 @@ function arBuildHTML(ctx){
   .pill-green { background: #eaf3de; color: #3b6d11; }
   .pill-gray  { background: #f1efe8; color: #444441; }
 
+  /* Table wrapper */
   .table-wrap { overflow-x: visible; width: 100%; }
 
   table {
@@ -327,6 +358,7 @@ function arBuildHTML(ctx){
 
   colgroup col:first-child { width: 120px; }
 
+  /* Header rows */
   thead tr:first-child th { border-bottom: none; }
   thead tr:last-child th  { border-top: none; }
 
@@ -340,13 +372,14 @@ function arBuildHTML(ctx){
     line-height: 1.2;
     word-break: break-word;
   }
-  th.left { text-align: left; }
+th.left { text-align: left; }
 
   th.grp-may  { background: #0c447c; color: #b5d4f4; border-color: #185fa5; text-align: center; }
-  th.grp-apr  { background: #3b6d11; color: #c0dd97; border-color: #639922; text-align: center; }
-  th.grp-var  { background: #854f0b; color: #fac775; border-color: #ba7517; text-align: center; }
-  th.sub      { font-size: 10px; font-weight: 400; }
+th.grp-apr  { background: #3b6d11; color: #c0dd97; border-color: #639922; text-align: center; }
+th.grp-var  { background: #854f0b; color: #fac775; border-color: #ba7517; text-align: center; }
+th.sub      { font-size: 10px; font-weight: 400; }
 
+  /* Body cells */
   td {
     padding: 4px 5px;
     text-align: right;
@@ -356,7 +389,7 @@ function arBuildHTML(ctx){
     overflow: visible;
     line-height: 1.3;
   }
-  td.name {
+td.name {
     text-align: left;
     font-size: 9.5px;
     color: #1a1a2e;
@@ -371,23 +404,25 @@ function arBuildHTML(ctx){
     font-weight: 600;
     border-top: 1.5px solid #b0bcc8;
   }
-  tr.pct-row td {
+tr.pct-row td {
     color: #6b7a8d;
     font-size: 9px;
     background: #fafbfc;
   }
-  tr.cust:hover td { background: #f7f9fb; }
-  tr.spacer td { height: 8px; border: none; background: #f5f6f8; }
+tr.cust:hover td { background: #f7f9fb; }
+tr.spacer td { height: 8px; border: none; background: #f5f6f8; }
 
   .div-col { border-left: 2px solid #b0bcc8 !important; }
 
+  /* Variance colors */
   .pos-var { color: #a32d2d; font-weight: 600; }
   .neg-var { color: #27670a; font-weight: 600; }
   .zero    { color: #b0bcc8; }
 
-  td.editable { background: #f0f7ff; cursor: text; }
-  td.editable:focus-within { background: #e0efff; outline: 1.5px solid #378add; border-radius: 2px; }
-  input.cell-edit {
+  /* Editable cells */
+td.editable { background: #f0f7ff; cursor: text; }
+td.editable:focus-within { background: #e0efff; outline: 1.5px solid #378add; border-radius: 2px; }
+input.cell-edit {
     width: 100%;
     text-align: right;
     background: transparent;
@@ -399,12 +434,14 @@ function arBuildHTML(ctx){
     cursor: text;
     line-height: 1.3;
   }
-  input.cell-edit:focus { outline: none; }
+input.cell-edit:focus { outline: none; }
 
-  td.flagged, td.flagged input.cell-edit { background: #fff7e6 !important; color: #7a3e00; }
-  tr.cust:hover td.flagged { background: #fff0d0 !important; }
+  /* Flagged cells */
+td.flagged, td.flagged input.cell-edit { background: #fff7e6 !important; color: #7a3e00; }
+tr.cust:hover td.flagged { background: #fff0d0 !important; }
   .flag-icon { color: #ba7517; font-size: 11px; margin-left: 4px; vertical-align: middle; }
 
+  /* Recalc note */
   .recalc-note {
     display: none;
     font-size: 10.5px;
@@ -413,6 +450,7 @@ function arBuildHTML(ctx){
     font-style: italic;
   }
 
+  /* Flags section */
   .flags-section {
     margin-top: 24px;
     border: 1px solid #f0c880;
@@ -457,6 +495,7 @@ function arBuildHTML(ctx){
   .flag-table .val-neg { color: #a32d2d; font-weight: 600; }
   .flag-table .val-pos { color: #1a1a2e; }
 
+  /* Freeze button */
   .btn-freeze {
     display: inline-flex;
     align-items: center;
@@ -473,20 +512,25 @@ function arBuildHTML(ctx){
     white-space: nowrap;
   }
   .btn-freeze:hover { background: #e6f1fb; }
-  .btn-freeze.locked { border-color: #3b6d11; color: #3b6d11; }
+  .btn-freeze.locked {
+    border-color: #3b6d11;
+    color: #3b6d11;
+  }
   .btn-freeze.locked:hover { background: #eaf3de; }
 
-  body.frozen td.editable          { background: inherit !important; cursor: default; }
-  body.frozen td.editable:focus-within { outline: none; background: inherit !important; }
-  body.frozen input.cell-edit      { pointer-events: none; cursor: default; color: #1a1a2e; }
-  body.frozen td.flagged,
-  body.frozen td.flagged input.cell-edit { background: inherit !important; color: #1a1a2e !important; }
-  body.frozen tr.cust:hover td.flagged   { background: #f7f9fb !important; }
-  body.frozen .flag-icon           { display: none; }
-  body.frozen .flags-section       { display: none; }
-  body.frozen .recalc-note         { display: none !important; }
-  body.frozen td.name.flagged      { color: #1a1a2e; }
+  /* Frozen state overrides */
+body.frozen td.editable          { background: inherit !important; cursor: default; }
+body.frozen td.editable:focus-within { outline: none; background: inherit !important; }
+body.frozen input.cell-edit      { pointer-events: none; cursor: default; color: #1a1a2e; }
+body.frozen td.flagged,
+body.frozen td.flagged input.cell-edit { background: inherit !important; color: #1a1a2e !important; }
+body.frozen tr.cust:hover td.flagged   { background: #f7f9fb !important; }
+body.frozen .flag-icon           { display: none; }
+body.frozen .flags-section       { display: none; }
+body.frozen .recalc-note         { display: none !important; }
+body.frozen td.name.flagged      { color: #1a1a2e; }
 
+  /* Copy image button */
   .btn-copy {
     display: inline-flex;
     align-items: center;
@@ -507,17 +551,14 @@ function arBuildHTML(ctx){
   .btn-copy.error   { border-color: #a32d2d; color: #a32d2d; background: #fdf0f0; }
   .btn-row { display: flex; gap: 8px; align-items: center; }
 
+  /* Print */
   @media print {
     body { background: #fff; padding: 0; }
     .page { box-shadow: none; border-radius: 0; padding: 16px; }
-    input.cell-edit { -webkit-appearance: none; }
-  }
-  @media (max-width: 820px) {
-    .slide-builder-toolbar, .slide-builder-controls { grid-template-columns: 1fr; display: grid; }
-    .slide-builder-actions { justify-content: flex-start; }
+input.cell-edit { -webkit-appearance: none; }
   }
 </style>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src=" https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 </head>
 <body>
 <div class="page">
@@ -615,14 +656,19 @@ const vcTd = (v, extraClass = '') => {
   return '<td class="' + (v > 0 ? 'pos-var' : 'neg-var') + extraClass + '">' + fmt(v) + '</td>';
 };
 
+// === DATA (generated from the uploaded NetSuite exports) ===
+// Grand totals: raw, no offset applied.
 const RECENT_TOTAL = ${escJs(RECENT_TOTAL)};
 RECENT_TOTAL['60p'] = RECENT_TOTAL.b90 + RECENT_TOTAL.b90p;
 
 const OLD_TOTAL = ${escJs(OLD_TOTAL)};
 OLD_TOTAL['60p'] = OLD_TOTAL.b90 + OLD_TOTAL.b90p;
 
+// Top ${n} sorted by Total desc from recent file; prior-close values via lookup.
+// Offset already applied per customer to the individual bucket values below.
 const RAW = ${escJs(RAW)};
 
+// Mutable state for editable cells
 const state = {};
 RAW.forEach(r => {
   state[r.name] = { cur: r.cur, b30: r.b30, b60: r.b60, b90: r.b90, b90p: r.b90p, tot: r.tot, ab90: r.ab90, ab90p: r.ab90p };
@@ -630,11 +676,11 @@ RAW.forEach(r => {
 
 function calcTopN() {
   const t = { cur: 0, b30: 0, b60: 0, b90: 0, b90p: 0, tot: 0, ab90: 0, ab90p: 0 };
-  RAW.forEach(r => {
+RAW.forEach(r => {
     const s = state[r.name];
-    t.cur += s.cur; t.b30 += s.b30; t.b60 += s.b60; t.b90 += s.b90; t.b90p += s.b90p;
-    t.tot += (s.cur + s.b30 + s.b60 + s.b90 + s.b90p);
-    t.ab90 += s.ab90; t.ab90p += s.ab90p;
+t.cur += s.cur; t.b30 += s.b30; t.b60 += s.b60; t.b90 += s.b90; t.b90p += s.b90p;
+t.tot += (s.cur + s.b30 + s.b60 + s.b90 + s.b90p); // recalculated from buckets so edits flow through
+t.ab90 += s.ab90; t.ab90p += s.ab90p;
   });
   t['60p']  = t.b90 + t.b90p;
   t['a60p'] = t.ab90 + t.ab90p;
@@ -643,7 +689,7 @@ function calcTopN() {
 
 function parseInput(val) {
   const isNeg = val.trim().startsWith('(') || val.trim().startsWith('-');
-  const num = parseFloat(val.replace(/[(),\\-\\s,]/g, '').replace(/,/g, ''));
+  const num = parseFloat(val.replace(/[(),\-\s,]/g, '').replace(/,/g, ''));
   if (isNaN(num)) return null;
   return isNeg ? -Math.abs(num) : num;
 }
@@ -662,6 +708,7 @@ function render() {
   const old60p = OLD_TOTAL['60p'];
   let h = '';
 
+  // --- Total Amount ($) row ---
   h += '<tr class="total-row">' +
     '<td class="name">Total amount ($)</td>' +
     '<td>' + fmt(RECENT_TOTAL.cur) + '</td>' +
@@ -678,6 +725,7 @@ function render() {
     vcTd(recent60p - old60p) +
     '</tr>';
 
+  // --- % of total (bucket / grand total) ---
   h += '<tr class="pct-row">' +
     '<td class="name">% of total</td>' +
     '<td>' + pct(RECENT_TOTAL.cur,  RECENT_TOTAL.tot) + '</td>' +
@@ -694,8 +742,9 @@ function render() {
     '<td class="zero">-</td>' +
     '</tr>';
 
-  h += '<tr class="spacer"><td colspan="13"></td></tr>';
+  h += '<tr class="spacer"><td colspan="12"></td></tr>';
 
+  // --- Top N subtotal ---
   const t = calcTopN();
   h += '<tr class="total-row">' +
     '<td class="name">Top ' + RAW.length + ' customers</td>' +
@@ -713,6 +762,7 @@ function render() {
     vcTd(t['60p'] - t['a60p']) +
     '</tr>';
 
+  // --- % of total (Top N bucket / grand total same bucket) ---
   h += '<tr class="pct-row">' +
     '<td class="name">% of total</td>' +
     '<td>' + pct(t.cur,   RECENT_TOTAL.cur) + '</td>' +
@@ -729,9 +779,10 @@ function render() {
     '<td class="zero">-</td>' +
     '</tr>';
 
-  RAW.forEach(r => {
+  // --- Individual customers ---
+RAW.forEach(r => {
     const s = state[r.name];
-    const tot   = s.cur + s.b30 + s.b60 + s.b90 + s.b90p;
+    const tot   = s.cur + s.b30 + s.b60 + s.b90 + s.b90p; // recalculated from buckets so edits update the row total
     const c60p  = s.b90 + s.b90p;
     const ca60p = s.ab90 + s.ab90p;
     const fc    = r.flag ? ' flagged' : '';
@@ -756,27 +807,28 @@ function render() {
 
   document.getElementById('tb').innerHTML = h;
 
-  document.querySelectorAll('input.cell-edit').forEach(inp => {
-    inp.addEventListener('change', function () {
+  // Bind input events
+document.querySelectorAll('input.cell-edit').forEach(inp => {
+inp.addEventListener('change', function () {
       const val = parseInput(this.value);
       if (val !== null) {
         state[this.dataset.name][this.dataset.field] = val;
-        document.getElementById('recalc-note').style.display = 'block';
+document.getElementById('recalc-note').style.display = 'block';
         render();
       }
     });
   });
 
+  // --- Flags section ---
   const flaggedRows = RAW.filter(r => r.flag);
   if (!flaggedRows.length) {
-    document.getElementById('flags-section').style.display = 'none';
-    if (typeof arRenderSlidePreview === 'function') arRenderSlidePreview();
+document.getElementById('flags-section').style.display = 'none';
     return;
   }
-  document.getElementById('flags-section').style.display = '';
+document.getElementById('flags-section').style.display = '';
   let fh = '';
-  flaggedRows.forEach(r => {
-    r.flag_detail.forEach((fd, i) => {
+flaggedRows.forEach(r => {
+r.flag_detail.forEach((fd, i) => {
       const negClass = fd.recent_val < 0 ? 'val-neg' : 'val-pos';
       const oldClass = fd.old_val   < 0 ? 'val-neg' : 'val-pos';
       fh += '<tr>' +
@@ -788,8 +840,11 @@ function render() {
         '</tr>';
     });
   });
-  document.getElementById('flags-body').innerHTML = fh;
-  if (typeof arRenderSlidePreview === 'function') arRenderSlidePreview();
+document.getElementById('flags-body').innerHTML = fh;
+}
+
+function esc(s){
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 render();
@@ -799,10 +854,10 @@ async function copyTableAsImage() {
   const label = document.getElementById('copy-label');
 
   label.textContent = 'Capturing...';
-  btn.disabled = true;
+btn.disabled = true;
 
   try {
-    const target = document.querySelector('.table-wrap table');
+    const target = document.querySelector('table');
     const canvas = await html2canvas(target, {
       scale: 2,
       backgroundColor: '#ffffff',
@@ -812,15 +867,17 @@ async function copyTableAsImage() {
     });
 
     if (navigator.clipboard && window.ClipboardItem) {
-      canvas.toBlob(async blob => {
+canvas.toBlob(async blob => {
         try {
-          await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-          btn.classList.add('success');
-          label.textContent = '✓ Copied! Paste in PowerPoint';
+          await navigator.clipboard.write([
+            new ClipboardItem({ 'image/png': blob })
+          ]);
+btn.classList.add('success');
+label.textContent = '✓ Copied! Paste in PowerPoint';
           setTimeout(() => {
-            btn.classList.remove('success');
-            label.textContent = 'Copy as image';
-            btn.disabled = false;
+btn.classList.remove('success');
+label.textContent = 'Copy as image';
+btn.disabled = false;
           }, 3000);
         } catch (err) {
           downloadFallback(canvas, btn, label);
@@ -830,27 +887,27 @@ async function copyTableAsImage() {
       downloadFallback(canvas, btn, label);
     }
   } catch (err) {
-    btn.classList.add('error');
-    label.textContent = 'Error — try again';
+btn.classList.add('error');
+label.textContent = 'Error — try again';
     setTimeout(() => {
-      btn.classList.remove('error');
-      label.textContent = 'Copy as image';
-      btn.disabled = false;
+btn.classList.remove('error');
+label.textContent = 'Copy as image';
+btn.disabled = false;
     }, 3000);
   }
 }
 
 function downloadFallback(canvas, btn, label) {
   const link = document.createElement('a');
-  link.download = ${escJs(ctx.outName.replace(/\.html$/,'.png'))};
-  link.href = canvas.toDataURL('image/png');
-  link.click();
-  btn.classList.add('success');
-  label.textContent = '✓ Downloaded as PNG';
+link.download = ${escJs(ctx.outName.replace(/.html$/,'.png'))};
+link.href = canvas.toDataURL('image/png');
+link.click();
+btn.classList.add('success');
+label.textContent = '✓ Downloaded as PNG';
   setTimeout(() => {
-    btn.classList.remove('success');
-    label.textContent = 'Copy as image';
-    btn.disabled = false;
+btn.classList.remove('success');
+label.textContent = 'Copy as image';
+btn.disabled = false;
   }, 3000);
 }
 
@@ -862,15 +919,15 @@ function toggleFreeze() {
   const icon  = document.getElementById('freeze-icon');
 
   if (frozen) {
-    document.body.classList.add('frozen');
-    btn.classList.add('locked');
-    label.textContent = 'Unlock report';
-    icon.innerHTML = '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>';
+document.body.classList.add('frozen');
+btn.classList.add('locked');
+label.textContent = 'Unlock report';
+icon.innerHTML = '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>';
   } else {
-    document.body.classList.remove('frozen');
-    btn.classList.remove('locked');
-    label.textContent = 'Lock report';
-    icon.innerHTML = '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>';
+document.body.classList.remove('frozen');
+btn.classList.remove('locked');
+label.textContent = 'Lock report';
+icon.innerHTML = '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>';
   }
 }
 </script>
