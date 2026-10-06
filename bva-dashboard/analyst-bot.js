@@ -508,6 +508,7 @@ function initAnalystBot(DATA){
         + '<div class="fb-sub">Things you can ask</div><ul class="fb-ul">'
         + '<li><b>Overall:</b> "Executive summary", "How are we doing vs plan this quarter?"</li>'
         + '<li><b>Any category, account or vendor:</b> "Zoom vs plan", "What happened with Consulting in Q2?", "670800 YTD"</li>'
+        + '<li><b>Compare:</b> "Zoom vs Microsoft", "Compare CDW and Anthropic full year"</li>'
         + '<li><b>Rankings:</b> "Top 5 unfavorable vendors", "Biggest savings by account full year vs forecast"</li>'
         + '<li><b>Exceptions:</b> "What is not in plan?", "Budget with no spend YTD"</li>'
         + '<li><b>Pacing:</b> "Budget utilization", "Monthly trend for Software"</li>'
@@ -896,7 +897,139 @@ function initAnalystBot(DATA){
 
   /* ---------------- router ---------------- */
   var CTX = null;
-  var FOLLOWABLE = { entity:1, top:1, total:1, unplanned:1, unused:1, util:1, trend:1, buffer:1 };
+  var FOLLOWABLE = { entity:1, top:1, total:1, unplanned:1, unused:1, util:1, trend:1, buffer:1, compare:1 };
+  /* ---------------- comparisons ---------------- */
+  function multiEntities(qn){
+    var chunks = qn.split(/\b(?:vs|versus|against|contra|compared to|compare|comparar|compara|comparado con|frente a|and|y|with|con)\b|,/);
+    var out = [], seen = {};
+    chunks.forEach(function(c){
+      c = String(c || '').trim(); if(!c) return;
+      var f = findEntities(c, typeHint(c), ['cat','gl','vendor']);
+      if(f[0] && !seen[f[0].E.key]){ seen[f[0].E.key] = 1; out.push(f[0].E); }
+    });
+    return out.slice(0, 4);
+  }
+  function short(n){ n = String(n); return n.length > 18 ? n.slice(0, 17) + '…' : n; }
+  function aCompare(list, P, bk){
+    bk = bk === 'both' ? 'p' : (bk || 'p');
+    var sc = list.every(function(E){ return E.type === 'cat'; }) ? 1 : 0.4, t = thrOf(P, sc);
+    var h = '<div class="fb-h">' + list.map(function(E){ return esc(E.name); }).join(' vs ') + ' <small>' + esc(pLabel(P)) + ' vs ' + esc(bName(bk)) + '</small></div>';
+    h += '<table class="fb-t fb-tw"><thead><tr><th></th><th>Working</th><th>' + (bk === 'f' ? 'FCST' : 'Plan') + '</th><th>Var</th><th>%</th></tr></thead><tbody>';
+    var vals = list.map(function(E){ return { E:E, x:ev(E, P, bk) }; });
+    vals.forEach(function(r){ h += '<tr><td>' + esc(r.E.name) + '<small>' + esc(typeLabel(r.E)) + '</small></td><td>' + fm(r.x.w) + '</td><td>' + fm(r.x.b) + '</td><td>' + vspan(r.x.v, t) + '</td><td>' + (pct(r.x.v, r.x.b) || '—') + '</td></tr>'; });
+    h += '</tbody></table>';
+    var parts = vals.map(function(r){
+      if(Math.abs(r.x.b) < 1 && Math.abs(r.x.w) >= 1) return esc(r.E.name) + ' has ' + fm(r.x.w) + ' with no ' + esc(bName(bk));
+      if(Math.abs(r.x.v) < t) return esc(r.E.name) + ' is roughly on ' + esc(bName(bk)) + ' (' + vspan(r.x.v, t) + ')';
+      return esc(r.E.name) + ' is ' + (r.x.v > 0 ? 'over' : 'under') + ' by ' + vspan(r.x.v, t);
+    });
+    h += '<p>In ' + esc(pLabel(P)) + ', ' + parts.join('; ') + '.';
+    var big = vals.slice().sort(function(a, b){ return b.x.w - a.x.w; });
+    if(big.length > 1 && big[1].x.w > 0) h += ' ' + esc(big[0].E.name) + ' spends ' + (big[0].x.w / big[1].x.w).toFixed(1) + '× ' + esc(big[1].E.name) + '.';
+    h += '</p>';
+    var Ps = [{ t:'m', i:RM }, { t:'q', i:RQ }, { t:'ytd' }, { t:'fy' }];
+    h += '<div class="fb-sub">Variance vs ' + esc(bName(bk)) + ' by period</div><table class="fb-t fb-tw"><thead><tr><th></th>' + list.map(function(E){ return '<th>' + esc(short(E.name)) + '</th>'; }).join('') + '</tr></thead><tbody>';
+    Ps.forEach(function(Q){ h += '<tr' + (samePeriod(Q, P) ? ' class="fb-hl"' : '') + '><td>' + esc(pLabel(Q)) + '</td>' + list.map(function(E){ return '<td>' + vspan(ev(E, Q, bk).v, thrOf(Q, sc)) + '</td>'; }).join('') + '</tr>'; });
+    h += '</tbody></table>';
+    var names = list.map(function(E){ return E.name; }).join(' vs ');
+    return { html:h, chips:chipsFor([
+      P.t === 'fy' ? names + ' ' + QL[RQ] : names + ' full year',
+      names + ' vs ' + (bk === 'p' ? 'forecast' : 'plan'),
+      list[0].name + ' ' + pLabel(P),
+      list[1].name + ' ' + pLabel(P)
+    ]) };
+  }
+
+  /* ---------------- premise check ("why is X over plan?") ---------------- */
+  function assertDir(qn){
+    if(/\b(over|above|overspen\w*|exceed\w*|sobre|encima|excedid\w*|sobregir\w*|higher than|mas alto)\b/.test(qn) && !/\bover time\b/.test(qn)) return 'unfav';
+    if(/\b(under|below|underspen\w*|debajo|ahorr\w*|savings?|lower than|mas bajo)\b/.test(qn)) return 'fav';
+    return null;
+  }
+  function premise(E, P, bk, dir){
+    if(!dir) return null;
+    var t = thrOf(P, scaleOf(E));
+    function ok(x){ return dir === 'unfav' ? x.v >= 0.5 : x.v <= -0.5; }
+    var cur = ev(E, P, bk);
+    if(ok(cur)) return null;
+    var cands = [{ t:'fy' }, { t:'ytd' }, { t:'q', i:RQ }, { t:'m', i:RM }, { t:'q', i:0 }, { t:'q', i:1 }, { t:'q', i:2 }, { t:'q', i:3 }];
+    for(var m = 0; m <= RM; m++) cands.push({ t:'m', i:m });
+    var best = null;
+    cands.forEach(function(Q){ var x = ev(E, Q, bk); if(ok(x) && (!best || Math.abs(x.v) > Math.abs(best.x.v))) best = { P:Q, x:x }; });
+    var word = dir === 'unfav' ? 'over' : 'under', nm = esc(E.name), bn = esc(bName(bk));
+    var now = 'In ' + esc(pLabel(P)) + ' ' + nm + ' is ' + (Math.abs(cur.v) < 0.5 ? 'exactly on ' + bn : (cur.v > 0 ? 'over' : 'under') + ' ' + bn + ' (' + vspan(cur.v, t) + ')');
+    if(best) return { P:best.P, note:'<p class="fb-note-q"><b>Quick check:</b> ' + now + '. It is ' + word + ' ' + bn + ' in <b>' + esc(pLabel(best.P)) + '</b> (' + vspan(best.x.v, thrOf(best.P, scaleOf(E))) + '), so here is that view.</p>' };
+    return { P:P, note:'<p class="fb-note-q"><b>Quick check:</b> ' + now + ', and it is not ' + word + ' ' + bn + ' in any period on this board.</p>' };
+  }
+
+  /* ---------------- out of scope: recommendations, scenarios, opinions ---------------- */
+  function aOutScope(kind, E, P, bk, qn){
+    bk = bk === 'both' ? 'p' : (bk || 'p');
+    var PP = P || { t:'fy' }, h = '', R, chips;
+    if(kind === 'rec'){
+      h = '<p><b>I don\'t make recommendations.</b> What to cut or keep is a business call. What I can do is show where the money is going, so that call is easier:</p>';
+      if(E){ R = aEntity(E, PP, bk, true); }
+      else {
+        R = aTop(PP, bk, 'vendor', 'unfav', 5, null);
+        var unus = VROWS.map(function(x){ return withB(rowVal(x.row, { t:'ytd' }), 'p'); }).filter(function(x){ return Math.abs(x.w) < 1 && x.p >= 1; });
+        if(unus.length) R.html += '<p class="fb-dim">Also: ' + unus.length + ' lines have Plan but no spend YTD (' + fm(unus.reduce(function(a, x){ return a + x.p; }, 0)) + ').</p>';
+      }
+      chips = ['Budget with no spend YTD', 'Top 5 unfavorable accounts full year', 'Real vs projected full year'];
+    } else if(kind === 'scenario'){
+      h = '<p><b>I can\'t run what-if scenarios.</b> I only report what is in this board\'s feeds (Working, Plan and Forecast).</p>';
+      var pm = qn.match(/(\d+(?:\.\d+)?)\s?(?:%|percent|por ?ciento)/);
+      if(pm && E){
+        var k = +pm[1] / 100, fy = ev(E, { t:'fy' }, bk), rem = 0;
+        for(var m = RM + 1; m < 12; m++){ var a = sumVals(E.rows, { t:'m', i:m }); rem += bk === 'f' ? a.f : a.p; }
+        h += '<p>For reference, plain arithmetic, not a forecast: ' + pm[1] + '% of ' + esc(E.name) + '\'s full-year Working (' + fm(fy.w) + ') is <b>' + fm(fy.w * k) + '</b>'
+          + (rem > 0 ? ', and ' + pm[1] + '% of its remaining ' + esc(bName(bk)) + ' after ' + esc(MONTHS[RM]) + ' (' + fm(rem) + ') is <b>' + fm(rem * k) + '</b>' : '') + '.</p>';
+      }
+      h += '<p class="fb-dim">Here is the baseline you would start from:</p>';
+      R = E ? aEntity(E, PP, bk, false) : aTotal(PP, bk);
+      chips = ['Budget utilization', 'Real vs projected full year', 'Executive summary'];
+    } else {
+      h = '<p><b>I can\'t judge whether something is "normal".</b> Here is the context an analyst would use to decide: the monthly pattern, the run-rate and the variance vs Plan.</p>';
+      R = aTrend(E || null, bk);
+      R.html += '<p class="fb-dim">For reference, I flag variances as material above ±$10K for a month, ±$25K for a quarter and ±$75K for the full year (lower for single vendors or accounts).</p>';
+      chips = [E ? E.name + ' vs plan' : 'Executive summary', 'Budget utilization', 'Top 5 unfavorable vendors this quarter'];
+    }
+    return { html:h + R.html, chips:chipsFor(chips) };
+  }
+
+  /* ---------------- random questions: a light joke, then back to the board ---------------- */
+  function hashStr(q){ var n = 0; for(var i = 0; i < q.length; i++) n = (n * 31 + q.charCodeAt(i)) >>> 0; return n; }
+  var RANDOM_TOPIC = /\b(weather|clima|tiempo hace|rain|lluvia|sunny|joke|chiste|funny|lunch|almuerzo|dinner|cena|coffee|cafe|hungry|hambre|pizza|food|comida|love|amor|date|novia|novio|football|futbol|soccer|sports|deporte|game|partido|how are you|como estas|que tal|who are you|quien eres|your name|tu nombre|meaning of life|sentido de la vida|bitcoin|crypto|stock market|bolsa|movie|pelicula|music|musica|song|cancion|vacation|vacaciones|weekend|fin de semana)\b/;
+  function teaser(n){
+    var Pq = { t:'q', i:RQ }, Pf = { t:'fy' }, opts = [];
+    var vq = vendorsIn(null, Pq, 'p').filter(function(k){ return !k.nov; }).sort(function(a, b){ return b.v.v - a.v.v; });
+    if(vq[0] && vq[0].v.v > 0) opts.push(esc(vq[0].name) + ' is ' + fv(vq[0].v.v) + ' over Plan in ' + esc(QL[RQ]) + '.');
+    var o = decompose(null, Pf, 'p');
+    if(Math.abs(o.buffer) >= 0.5) opts.push('without buffer moves, ' + esc(BU) + ' is ' + fv(o.excl) + ' vs Plan for the full year.');
+    var ytd = ev(TOTAL, { t:'ytd' }, 'p'); opts.push(esc(BU) + ' is ' + fv(ytd.v) + ' vs Plan year to date.');
+    var vs = vendorsIn(null, { t:'ytd' }, 'p').filter(function(k){ return !k.nov; }).sort(function(a, b){ return a.v.v - b.v.v; });
+    if(vs[0] && vs[0].v.v < 0) opts.push('the biggest vendor saving YTD is ' + esc(vs[0].name) + ' at ' + fv(vs[0].v.v) + '.');
+    return opts[n % opts.length];
+  }
+  function aRandom(qn){
+    var n = hashStr(qn), Pf = { t:'fy' }, line;
+    var fyf = ev(TOTAL, Pf, 'f'), fy = ev(TOTAL, Pf, 'p'), ytd = ev(TOTAL, { t:'ytd' }, 'p');
+    if(/weather|clima|tiempo hace|rain|lluvia|sunny/.test(qn)) line = 'The only forecast I follow is the ' + esc(FCST) + ', and today it says ' + esc(BU) + ' is ' + fv(fyf.v) + ' vs it for the full year. Bring an umbrella.';
+    else if(/joke|chiste|funny/.test(qn)) line = 'Why did the budget break up with the forecast? Too many unexplained variances.';
+    else if(/lunch|almuerzo|dinner|cena|coffee|cafe|hungry|hambre|pizza|food|comida/.test(qn)) line = 'I don\'t eat, I only expense. ' + (TE && TE.total ? 'T&amp;E in this board\'s feed is ' + fm(TE.total.g) + ' so far.' : 'And this board has no T&amp;E feed, so I can\'t even do that.');
+    else if(/love|amor|date|novia|novio/.test(qn)) line = 'My only relationship is with the Plan, and it\'s complicated: ' + fv(fy.v) + ' for the full year.';
+    else if(/football|futbol|soccer|sports|deporte|game|partido/.test(qn)) line = 'The only score I keep is the variance: ' + esc(BU) + ' is ' + fv(ytd.v) + ' vs Plan year to date. Still in the game.';
+    else if(/how are you|como estas|que tal/.test(qn)) line = 'Running favorable, thanks for asking: ' + esc(BU) + ' is ' + fv(ytd.v) + ' vs Plan year to date.';
+    else if(/who are you|quien eres|your name|tu nombre/.test(qn)) line = 'I\'m Felipe, a rule-based FP&amp;A analyst. I live inside this board and I only speak Working, Plan and Forecast.';
+    else line = [
+      'That\'s outside my cost center. I\'m budgeted only for BvA questions (and I\'m tracking favorable).',
+      'I searched every GL account for that. Closest match: nothing. Want something I can actually reconcile?',
+      'Interesting question, but if it doesn\'t have a Working and a Plan column, I\'m lost.',
+      'I\'d need a bigger budget to answer that. Meanwhile, here\'s something I do know.'
+    ][n % 4];
+    var h = '<p>' + line + '</p><p class="fb-dim">Fun fact from this board: ' + teaser(n) + '</p><p>Ask me about a category, account, vendor or period, or pick one of these:</p>';
+    return { html:h, chips:['Executive summary', 'Top 5 unfavorable vendors this quarter', 'Real vs projected full year', 'Help'] };
+  }
+
   var RX = {
     menu: /^(menu|main menu|menu principal|sections?|secciones|seccion|home|back|volver|regresar|inicio)\b/,
     help: /^(help|ayuda|hi|hello|hola|hey|start)\b|what can (you|i) (do|ask)|que (puedo|puedes)|como funciona|how does this work|what do you know/,
@@ -915,6 +1048,10 @@ function initAnalystBot(DATA){
     top: /\b(top|biggest|largest|main|major|ranking|rank|worst|best|mayor(es)?|principal(es)?|peores|mejores|most|highest|lowest|key drivers|drivers|mas)\b|which (vendors|accounts|categories)|cuales (son )?(los|las) (proveedores|cuentas|categorias)/,
     why: /\bwhy\b|por que|porque|explain|explica|reason|razon|what happened|que paso|que pasa|driving|drove|driver|cause/,
     money: /\b(total|overall|how much|cuanto|spend|spent|spending|gasto|gastos|gastamos|variance|varianza|vs|versus|against|contra|compared|working|actuals?|expense|expenses|cost|costs|budget|plan|forecast|fcst)\b/,
+    opinion: /\b(is (this|that|it|[a-z0-9 ]{1,40}) (normal|ok|okay|good|bad|healthy|worrying|concerning|a problem|reasonable|expected)|es normal|esta bien|es (bueno|malo|preocupante|razonable)|should i (worry|be worried)|debo preocupar\w*|me debo preocupar)\b/,
+    scenario: /\bwhat if\b|\bque pasa\w* si\b|\bsi (recort|cort|reduc|aument|baj|sub)\w*|\bscenarios?\b|\bescenarios?\b|\bsimula\w*|\bimpact of (cutting|reducing|adding|removing)\b|\d+(\.\d+)?\s?%|\b\d+ (percent|por ?ciento)\b/,
+    rec: /\b(should (we|i)|recommend\w*|recomiend\w*|recomendac\w*|deberia\w*|debemos|what (can|could) we cut|que (podemos|deberiamos) (recortar|cortar)|advice|aconsej\w*|consejo\w*|suggest\w*|sugier\w*|sugerenc\w*)\b/,
+    compare: /\b(compare|comparar|compara|comparison|comparacion|versus|vs|against|contra|side by side|frente a)\b/,
     follow: /^(and|y|what about|how about|same|lo mismo|and in|and for|y en|y para|y vs|and vs|and the|y el|y la|now|ahora)\b/
   };
   function exec(S){
@@ -931,8 +1068,19 @@ function initAnalystBot(DATA){
       case 'trend': return aTrend(S.E, S.bk);
       case 'buffer': return aBuffer(S.scope, S.P || { t:'fy' }, S.bk);
       case 'top': return aTop(S.P || { t:'q', i:RQ }, S.bk, S.dim, S.dir, S.n || 5, S.scope);
-      case 'entity': return aEntity(S.E, S.P || { t:'q', i:RQ }, S.bk || 'p', S.why);
-      case 'total': return aTotal(S.P || { t:'q', i:RQ }, S.bk || 'p');
+      case 'entity':
+        var pe = premise(S.E, S.P || { t:'q', i:RQ }, S.bk || 'p', S.assert);
+        var re = aEntity(S.E, pe ? pe.P : (S.P || { t:'q', i:RQ }), S.bk || 'p', S.why);
+        if(pe) re.html = pe.note + re.html;
+        return re;
+      case 'total':
+        var pt = premise(TOTAL, S.P || { t:'q', i:RQ }, S.bk || 'p', S.assert);
+        var rt = aTotal(pt ? pt.P : (S.P || { t:'q', i:RQ }), S.bk || 'p');
+        if(pt) rt.html = pt.note + rt.html;
+        return rt;
+      case 'compare': return aCompare(S.list, S.P || { t:'q', i:RQ }, S.bk || 'p');
+      case 'outscope': return aOutScope(S.kind, S.E, S.P, S.bk, S.raw || S.qn);
+      case 'random': return aRandom(S.qn);
     }
     return aFallback(S.qn || '');
   }
@@ -946,10 +1094,19 @@ function initAnalystBot(DATA){
     var isTop = I.top && !I.summary;
     var found = findEntities(qn, isTop ? null : typeHint(qn));
     var best = found[0] ? found[0].E : null;
-    var S = { qn:qn, P:P, bk:bk };
+    var S = { qn:qn, P:P, bk:bk, raw:String(raw || '').toLowerCase() };
+    if(/\d+(\.\d+)?\s?%/.test(S.raw)) I.scenario = true;
     if(I.menu) return (S.intent = 'menu', S);
     if(I.help) return (S.intent = 'help', S);
     if(I.actions && !best) return (S.intent = 'actions', S);
+    var bestNE = best && best.type !== 'employee' ? best : null;
+    if(I.opinion) return (S.intent = 'outscope', S.kind = 'opinion', S.E = bestNE || (CTX && CTX.E) || null, S);
+    if(I.scenario) return (S.intent = 'outscope', S.kind = 'scenario', S.E = bestNE, S);
+    if(I.rec) return (S.intent = 'outscope', S.kind = 'rec', S.E = bestNE, S);
+    if(I.compare || /\b(and|y)\b/.test(qn)){
+      var multi = multiEntities(qn);
+      if(multi.length >= 2) return (S.intent = 'compare', S.list = multi, S);
+    }
     if(best && best.type === 'employee' && !isTop) return (S.intent = 'employee', S.E = best, S);
     if(I.hcStrong || (I.hcWeak && !best)){
       if(!(best && (best.type === 'gl' || best.type === 'cat') && !I.hcStrong)){
@@ -970,7 +1127,7 @@ function initAnalystBot(DATA){
       if(!S.dim && !scope && !/\bdrivers?\b/.test(qn) && /\b(vendor|proveedor)/.test(qn)) S.dim = 'vendor';
       return S;
     }
-    if(best){ S.intent = 'entity'; S.E = best; S.why = I.why; S.alts = found.slice(1).filter(function(x){ return x.s >= found[0].s - 0.3 && x.E.name !== best.name; }).slice(0, 2).map(function(x){ return x.E; }); return S; }
+    if(best){ S.intent = 'entity'; S.E = best; S.why = I.why; S.assert = P0 ? null : assertDir(qn); S.alts = found.slice(1).filter(function(x){ return x.s >= found[0].s - 0.3 && x.E.name !== best.name; }).slice(0, 2).map(function(x){ return x.E; }); return S; }
     // follow-ups: "and Q2?", "y vs forecast?", "same for YTD"
     var unk = queryTokens(qn);
     var shortQ = qn.split(' ').length <= 4;
@@ -982,8 +1139,10 @@ function initAnalystBot(DATA){
     }
     if(I.summary) return (S.intent = 'summary', S);
     if(isTop){ S.intent = 'top'; S.dim = parseDim(qn); S.dir = parseDir(qn); S.n = parseN(qn); return S; }
+    var nTok = qn.split(' ').length;
+    if(RANDOM_TOPIC.test(qn) || (!I.money && !P0 && !bk0 && !I.why && !I.follow && nTok >= 3)){ S.intent = 'random'; return S; }
     if(unk.length && (I.follow || !I.money)){ S.intent = 'fallback'; return S; }
-    if(I.money || P || bk || I.why){ S.intent = 'total'; S.unk = unk; return S; }
+    if(I.money || P || bk || I.why){ S.intent = 'total'; S.unk = unk; S.assert = P0 ? null : assertDir(qn); return S; }
     S.intent = 'fallback';
     return S;
   }
@@ -1130,12 +1289,20 @@ function initAnalystBot(DATA){
     + '.fb-card{display:flex;gap:9px;align-items:flex-start;text-align:left;border:1px solid #e2e8f0;background:#fafbff;border-radius:12px;padding:10px;cursor:pointer;font-family:inherit;transition:.12s}'
     + '.fb-card:hover{border-color:#818cf8;background:#eef2ff}.fb-card.on{border-color:#4f46e5;background:#eef2ff;box-shadow:inset 0 0 0 1px #4f46e5}.fb-menu .fb-card:last-child:nth-child(odd){grid-column:1 / -1}'
     + '.fb-t.fb-bridge td:first-child{font-weight:600}.fb-t tr.fb-bufrow td{background:#f8fafc}.fb-t tr.fb-bufrow td:first-child{font-style:italic}'
+    + '.fb-note-q{background:#eef2ff;border:1px solid #c7d2fe;border-radius:10px;padding:7px 9px;font-size:11.5px;color:#312e81}'
     + '.fb-t tr.fb-tot td{font-weight:800;border-top:1.5px solid #e2e8f0}'
     + '.fb-card i{font-size:18px;color:#4f46e5;margin-top:1px;flex-shrink:0}.fb-card b{display:block;font-size:12px;color:#0f172a;line-height:1.25}.fb-card small{display:block;font-size:10.5px;color:#64748b;margin-top:3px;line-height:1.35}'
     + '.fb-sec-tag{display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#4338ca;background:#eef2ff;border-radius:999px;padding:3px 9px;margin-bottom:8px}'
     + '.fb-jump{display:inline-flex;align-items:center;gap:5px;border:none;background:none;color:#4f46e5;font-weight:800;font-size:11.5px;cursor:pointer;padding:0;margin:2px 0 8px;font-family:inherit}.fb-jump:hover{text-decoration:underline}'
     + '.fb-modal{position:absolute;inset:0;z-index:5;background:rgba(15,23,42,.38);display:flex;align-items:center;justify-content:center;padding:20px}.fb-modal[hidden]{display:none}'
     + '.fb-mbox{background:#fff;border-radius:16px;padding:20px 18px 16px;max-width:320px;width:100%;box-shadow:0 18px 40px rgba(15,23,42,.25);text-align:center}'
+    + '.fb-mface{width:64px;height:64px;border-radius:18px;background:linear-gradient(120deg,#1e2450,#312e81);display:flex;align-items:center;justify-content:center;margin:0 auto 12px;box-shadow:0 6px 18px rgba(49,46,129,.28)}.fb-mface .fb-face{width:46px;height:46px}'
+    + '.fb-face .fb-wave{opacity:0;transition:opacity .15s;transform-box:fill-box;transform-origin:40% 100%}'
+    + '.fb-bye .fb-face .fb-wave{opacity:1;animation:fb-wave .38s ease-in-out infinite alternate}'
+    + '.fb-bye .fb-face .fb-eyes{opacity:0;animation:none}.fb-bye .fb-face .fb-eyes-c{opacity:1}.fb-bye .fb-face .fb-ear-r{opacity:0}'
+    + '.fb-bye .fb-face .fb-smile{animation:none;transform:scale(1.18,1.45)}'
+    + '.fb-bye .fb-mact{display:none}.fb-bye .fb-mt{font-size:16px}'
+    + '@keyframes fb-wave{from{transform:rotate(-14deg)}to{transform:rotate(16deg)}}'
     + '.fb-mi{width:42px;height:42px;border-radius:12px;background:#fff7ed;color:#ea580c;display:flex;align-items:center;justify-content:center;font-size:22px;margin:0 auto 10px}'
     + '.fb-mt{font-size:14px;font-weight:800;color:#0f172a;margin-bottom:6px}.fb-mp{font-size:12px;line-height:1.5;color:#475569;margin:0 0 16px}'
     + '.fb-mact{display:flex;gap:8px;justify-content:center;align-items:center}'
@@ -1146,13 +1313,14 @@ function initAnalystBot(DATA){
     + '@media print{#fpa-bot-root{display:none!important}}';
   var st = d.createElement('style'); st.id = 'fpa-bot-style'; st.textContent = CSS; (d.head || d.documentElement).appendChild(st);
 
+  var FACE = '<svg class="fb-face" viewBox="0 0 32 32" aria-hidden="true"><line x1="16" y1="3.5" x2="16" y2="7.5" stroke="#c7d2fe" stroke-width="1.6" stroke-linecap="round"/><circle class="fb-ant" cx="16" cy="3" r="2" fill="#a5f3fc"/><rect x="5" y="7.5" width="22" height="19" rx="7" fill="#eef2ff"/><rect x="2.6" y="14" width="2.6" height="6" rx="1.3" fill="#c7d2fe"/><rect class="fb-ear-r" x="26.8" y="14" width="2.6" height="6" rx="1.3" fill="#c7d2fe"/><g class="fb-eyes"><ellipse cx="12" cy="15.5" rx="2.2" ry="2.6" fill="#312e81"/><ellipse cx="20" cy="15.5" rx="2.2" ry="2.6" fill="#312e81"/><circle cx="12.8" cy="14.6" r=".7" fill="#fff"/><circle cx="20.8" cy="14.6" r=".7" fill="#fff"/></g><circle cx="9.4" cy="20.2" r="1.5" fill="#fda4af" opacity=".75"/><circle cx="22.6" cy="20.2" r="1.5" fill="#fda4af" opacity=".75"/><path class="fb-smile" d="M12 20.6 Q16 24.6 20 20.6" fill="none" stroke="#312e81" stroke-width="1.8" stroke-linecap="round"/><g class="fb-eyes-c" fill="none" stroke="#312e81" stroke-width="1.7" stroke-linecap="round"><path d="M9.8 16.4 Q12 13.9 14.2 16.4"/><path d="M17.8 16.4 Q20 13.9 22.2 16.4"/></g><g class="fb-hand"><rect x="29.4" y="15.2" width="3.4" height="9" rx="1.7" fill="#c7d2fe" stroke="#312e81" stroke-width=".7"/><rect x="24.6" y="10.6" width="6" height="2.6" rx="1.3" fill="#fef3c7" stroke="#312e81" stroke-width=".7" transform="rotate(28 30.6 11.9)"/><circle cx="31.1" cy="14.4" r="3.4" fill="#fef3c7" stroke="#312e81" stroke-width=".7"/><path d="M29.6 15.6 Q31.1 16.6 32.6 15.6" fill="none" stroke="#312e81" stroke-width=".55" stroke-linecap="round"/></g><g class="fb-wave"><rect x="28.9" y="9" width="3.4" height="12.5" rx="1.7" fill="#c7d2fe" stroke="#312e81" stroke-width=".7" transform="rotate(14 30.6 21.5)"/><path d="M29.2 4.6 L28.7 1.4 M31.3 3.9 L31.3 0.4 M33.4 4.6 L34 1.4 M28.2 7.6 L26.3 6.4" stroke="#312e81" stroke-width="1.5" stroke-linecap="round"/><path d="M29.2 4.6 L28.7 1.4 M31.3 3.9 L31.3 0.4 M33.4 4.6 L34 1.4 M28.2 7.6 L26.3 6.4" stroke="#fef3c7" stroke-width=".7" stroke-linecap="round"/><circle cx="31.3" cy="7.2" r="3.7" fill="#fef3c7" stroke="#312e81" stroke-width=".7"/></g></svg>';
   var root = d.createElement('div'); root.id = 'fpa-bot-root';
   root.innerHTML = '<button type="button" class="fb-fab" aria-label="Ask Felipe, the FP&amp;A analyst"><i class="ti ti-message-chatbot"></i> Ask FP&amp;A</button>'
     + '<div class="fb-panel" role="dialog" aria-label="Felipe, FP&amp;A analyst">'
-    + '<div class="fb-head"><div class="fb-av">' + '<svg class="fb-face" viewBox="0 0 32 32" aria-hidden="true"><line x1="16" y1="3.5" x2="16" y2="7.5" stroke="#c7d2fe" stroke-width="1.6" stroke-linecap="round"/><circle class="fb-ant" cx="16" cy="3" r="2" fill="#a5f3fc"/><rect x="5" y="7.5" width="22" height="19" rx="7" fill="#eef2ff"/><rect x="2.6" y="14" width="2.6" height="6" rx="1.3" fill="#c7d2fe"/><rect class="fb-ear-r" x="26.8" y="14" width="2.6" height="6" rx="1.3" fill="#c7d2fe"/><g class="fb-eyes"><ellipse cx="12" cy="15.5" rx="2.2" ry="2.6" fill="#312e81"/><ellipse cx="20" cy="15.5" rx="2.2" ry="2.6" fill="#312e81"/><circle cx="12.8" cy="14.6" r=".7" fill="#fff"/><circle cx="20.8" cy="14.6" r=".7" fill="#fff"/></g><circle cx="9.4" cy="20.2" r="1.5" fill="#fda4af" opacity=".75"/><circle cx="22.6" cy="20.2" r="1.5" fill="#fda4af" opacity=".75"/><path class="fb-smile" d="M12 20.6 Q16 24.6 20 20.6" fill="none" stroke="#312e81" stroke-width="1.8" stroke-linecap="round"/><g class="fb-eyes-c" fill="none" stroke="#312e81" stroke-width="1.7" stroke-linecap="round"><path d="M9.8 16.4 Q12 13.9 14.2 16.4"/><path d="M17.8 16.4 Q20 13.9 22.2 16.4"/></g><g class="fb-hand"><rect x="29.4" y="15.2" width="3.4" height="9" rx="1.7" fill="#c7d2fe" stroke="#312e81" stroke-width=".7"/><rect x="24.6" y="10.6" width="6" height="2.6" rx="1.3" fill="#fef3c7" stroke="#312e81" stroke-width=".7" transform="rotate(28 30.6 11.9)"/><circle cx="31.1" cy="14.4" r="3.4" fill="#fef3c7" stroke="#312e81" stroke-width=".7"/><path d="M29.6 15.6 Q31.1 16.6 32.6 15.6" fill="none" stroke="#312e81" stroke-width=".55" stroke-linecap="round"/></g></svg>' + '</div><div><div class="fb-tt">Felipe Analyst</div><div class="fb-st">' + esc(BU) + ' · ' + esc(META.month || '') + ' ' + esc(FY) + ' · ' + esc(QL[RQ]) + '</div></div><div class="fb-hbtns"><button type="button" class="fb-clr" title="Clear chat" aria-label="Clear chat"><i class="ti ti-eraser"></i></button><button type="button" class="fb-x" title="Close" aria-label="Close">&times;</button></div></div>'
+    + '<div class="fb-head"><div class="fb-av">' + FACE + '</div><div><div class="fb-tt">Felipe Analyst</div><div class="fb-st">' + esc(BU) + ' · ' + esc(META.month || '') + ' ' + esc(FY) + ' · ' + esc(QL[RQ]) + '</div></div><div class="fb-hbtns"><button type="button" class="fb-clr" title="Clear chat" aria-label="Clear chat"><i class="ti ti-eraser"></i></button><button type="button" class="fb-x" title="Close" aria-label="Close">&times;</button></div></div>'
     + '<div class="fb-msgs"></div>'
     + '<div class="fb-ctx"><span class="fb-ctx-l"><i class="ti ti-target-arrow"></i><span>Section:</span><span class="fb-ctx-t">Whole board</span></span><button type="button" class="fb-ctx-btn"><i class="ti ti-layout-grid"></i> Sections</button></div>'
-    + '<div class="fb-modal" hidden><div class="fb-mbox"><div class="fb-mi"><i class="ti ti-alert-triangle"></i></div><div class="fb-mt"></div><p class="fb-mp"></p><div class="fb-mact"><button type="button" class="fb-mbtn fb-mb-sec">Cancel</button><button type="button" class="fb-mbtn fb-mb-pri"></button></div></div></div>'
+    + '<div class="fb-modal" hidden><div class="fb-mbox"><div class="fb-mface">' + FACE + '</div><div class="fb-mt"></div><p class="fb-mp"></p><div class="fb-mact"><button type="button" class="fb-mbtn fb-mb-sec"></button><button type="button" class="fb-mbtn fb-mb-pri"></button></div></div></div>'
     + '<form class="fb-in"><input type="text" placeholder="Ask about a vendor, account, category, quarter..." autocomplete="off" /><button type="submit" aria-label="Send"><i class="ti ti-send"></i></button></form>'
     + '</div>';
   d.body.appendChild(root);
@@ -1244,25 +1412,41 @@ function initAnalystBot(DATA){
   }
   function hasHistory(){ return !!msgs.querySelector('.fb-msg.me'); }
   var modal = root.querySelector('.fb-modal'), modalOk = null;
-  function confirmBox(title, text, okLabel, onOk){
+  var byeTimer = null;
+  function confirmBox(title, text, okLabel, onOk, cancelLabel){
+    modal.classList.remove('fb-bye');
     modal.querySelector('.fb-mt').textContent = title;
     modal.querySelector('.fb-mp').textContent = text;
     modal.querySelector('.fb-mbtn.fb-mb-pri').textContent = okLabel;
+    modal.querySelector('.fb-mbtn.fb-mb-sec').textContent = cancelLabel || 'Cancel';
     modalOk = onOk; modal.hidden = false;
     modal.querySelector('.fb-mbtn.fb-mb-sec').focus();
   }
-  function closeModal(){ modal.hidden = true; modalOk = null; }
+  function closeModal(){ if(byeTimer) return; modal.hidden = true; modalOk = null; modal.classList.remove('fb-bye'); }
+  // Felipe waves goodbye, then the session closes and is cleared.
+  function goodbye(){
+    modal.classList.add('fb-bye');
+    modal.querySelector('.fb-mt').textContent = 'Goodbye!';
+    modal.querySelector('.fb-mp').textContent = 'Thanks for stopping by. See you at the next close.';
+    modal.hidden = false;
+    byeTimer = setTimeout(function(){
+      byeTimer = null; reset(); hide();
+      modal.hidden = true; modalOk = null; modal.classList.remove('fb-bye');
+    }, 1600);
+    return true;
+  }
   modal.querySelector('.fb-mbtn.fb-mb-sec').addEventListener('click', closeModal);
-  modal.querySelector('.fb-mbtn.fb-mb-pri').addEventListener('click', function(){ var f = modalOk; closeModal(); if(f) f(); });
-  modal.addEventListener('click', function(e){ if(e.target === modal) closeModal(); });
+  modal.querySelector('.fb-mbtn.fb-mb-pri').addEventListener('click', function(){ var f = modalOk; modalOk = null; var keep = f ? f() : false; if(!keep) closeModal(); });
+  modal.addEventListener('click', function(e){ if(e.target === modal && !byeTimer) closeModal(); });
   // Closing ends the chat session: history is cleared (with a warning if there is any).
   function close(){
+    if(byeTimer) return;
     if(!hasHistory()){ reset(); hide(); return; }
-    confirmBox('Close this chat session?', 'Your question history will be cleared. Next time you open the analyst, it starts fresh.', 'Close & clear', function(){ reset(); hide(); });
+    confirmBox('Close our session?', 'Heads up: if we close it, I\'ll clear our question history and we\'ll start fresh next time.', 'Close & clear', goodbye, 'Keep chatting');
   }
   function clearChat(){
     if(!hasHistory()){ reset(); open(); return; }
-    confirmBox('Clear the conversation?', 'All questions and answers in this chat will be removed. You will go back to the section menu.', 'Clear chat', function(){ reset(); open(); });
+    confirmBox('Start over?', 'I\'ll wipe our conversation and take you back to the sections menu.', 'Clear chat', function(){ reset(); open(); }, 'Cancel');
   }
   fab.addEventListener('click', open);
   root.querySelector('.fb-x').addEventListener('click', close);
