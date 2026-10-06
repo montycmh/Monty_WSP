@@ -147,6 +147,7 @@ t.textContent = msg; t.classList.add('show');
 setTimeout(() => t.classList.remove('show'), 1800);
 }
 function resetAll(){
+unmountAnalystBot();
 state.model = null;
 state.edits = {};
 state.files = { quarter:null, year:null, hc:null, te:null, opex:null };
@@ -167,6 +168,7 @@ setBoardCount(1);
 updateBuildButton();
 }
 function backToWorkspace(){
+unmountAnalystBot();
 document.getElementById('upload-shell').classList.remove('hidden');
 dom.root.classList.add('hidden');
 if(dom.backNav) dom.backNav.classList.add('hidden');
@@ -271,6 +273,7 @@ function sum3(row, start){ return v(row[start]) + v(row[start+1]) + v(row[start+
 function fmtK(n){
 if(!Number.isFinite(n) || n === 0) return '—';
 const rounded = Math.round(n / 1000);
+if(rounded === 0) return '$0K';
 const abs = Math.abs(rounded).toLocaleString('en-US');
 if(rounded > 0) return '+$' + abs + 'K';
 return '-$' + abs + 'K';
@@ -278,15 +281,17 @@ return '-$' + abs + 'K';
 function fmtKplain(n){
 if(!Number.isFinite(n) || n === 0) return '—';
 const rounded = Math.round(n / 1000);
+if(rounded === 0) return '$0K';
 const abs = Math.abs(rounded).toLocaleString('en-US');
 return rounded < 0 ? '($' + abs + 'K)' : '$' + abs + 'K';
 }
+function isZeroK(n){ return !n || Math.round(n / 1000) === 0; }
 function varClass(n){
-if(!n) return 'var-neu';
+if(isZeroK(n)) return 'var-neu';
 return n < 0 ? 'var-fav' : 'var-unfav';
 }
 function varianceBadge(n){
-if(!n) return '<span class="badge b-plan">PLAN</span>';
+if(isZeroK(n)) return '<span class="badge b-plan">PLAN</span>';
 return n < 0 ? '<span class="badge b-fav">↓ FAVORABLE</span>' : '<span class="badge b-unfav">↑ UNFAVORABLE</span>';
 }
 function classifyRow(label){
@@ -354,7 +359,12 @@ label: String(qLabelRow[b] || ('Q' + (qi+1))).trim(),
 w: sum3(raw, b),      // Working  = 3 month cells
 p: sum3(raw, b + 3),  // Plan     = next 3 month cells
 f: sum3(raw, b + 6)   // Forecast = next 3 month cells
-}))
+})),
+// 12 fiscal months (Working / Plan / Forecast) — used by the FP&A analyst bot.
+months: qBases.reduce((out, b) => out.concat([0,1,2].map(k => ({
+label: String((rows[3] || [])[b + k] || '').trim(),
+w: v(raw[b + k]), p: v(raw[b + 3 + k]), f: v(raw[b + 6 + k])
+}))), [])
 });
 }
 const monthCols = detectYearMonthlyColumns(headerRows);
@@ -647,6 +657,7 @@ ${renderActions(model)}
 dom.root.innerHTML = html;
 bindInteractive(model);
 renderCharts(model);
+mountAnalystBot();
 }
 function renderOverview(model){
 const k = model.quarter.kpis;
@@ -666,8 +677,9 @@ ${kpiCard(model.meta.fyToken, y.kpi5, 'Full Year vs Plan')}
 </section>`;
 }
 function kpiCard(label, val, sub){
-const cls = val < 0 ? 'kpi-fav' : val > 0 ? 'kpi-unfav' : 'kpi-neu';
-const chip = val < 0 ? 'fav' : val > 0 ? 'unfav' : 'plan';
+const z = isZeroK(val);
+const cls = z ? 'kpi-neu' : val < 0 ? 'kpi-fav' : 'kpi-unfav';
+const chip = z ? 'plan' : val < 0 ? 'fav' : 'unfav';
 let icon = 'ti-chart-bar';
 if(/month/i.test(sub)) icon = 'ti-calendar-dollar';
 else if(/full year/i.test(sub)) icon = 'ti-calendar-stats';
@@ -740,15 +752,15 @@ const trCls = r.rowType === 'expense' ? 'tr-exp' : '';
 const dc = drill ? ' drill-cell' : '';
 const da = (period, periodLabel) => drill ? ` data-drill="1" data-scope="q" data-row-index="${r.index}" data-period="${period}" data-benchmark="${benchmarkKey}" data-label="${escapeHtml(cleanLabel(r.label))}" data-period-label="${escapeHtml(periodLabel)}"` : '';
 h += `<tr class="${trCls}"><td>${escapeHtml(cleanLabel(r.label))}</td>`+
-`<td class="yw tot-col${dc}"${da('q','Quarter total')}>${fmtK(r.total.w)}</td>`+
-`<td class="tot-col${dc}"${da('q','Quarter total')}>${fmtK(r.total[benchmarkKey])}</td>`+
+`<td class="yw tot-col${dc}"${da('q','Quarter total')}>${fmtKplain(r.total.w)}</td>`+
+`<td class="tot-col${dc}"${da('q','Quarter total')}>${fmtKplain(r.total[benchmarkKey])}</td>`+
 `<td class="yv tot-col tot-end ${varClass(qVar)}${dc}"${da('q','Quarter total')}>${fmtK(qVar)}</td>`;
 r.months.forEach((m, idx) => {
 const mv = m.w - m[benchmarkKey];
 const rv = idx===REVIEW_MONTH_IDX;
 const pl = m.label || monthLabels[idx] || ('Month ' + (idx+1));
-h += `<td class="yw${rv?' rev-col rev-start':''}${dc}"${da(idx,pl)}>${fmtK(m.w)}</td>`+
-`<td class="${rv?'rev-col':''}${dc}"${da(idx,pl)}>${fmtK(m[benchmarkKey])}</td>`+
+h += `<td class="yw${rv?' rev-col rev-start':''}${dc}"${da(idx,pl)}>${fmtKplain(m.w)}</td>`+
+`<td class="${rv?'rev-col':''}${dc}"${da(idx,pl)}>${fmtKplain(m[benchmarkKey])}</td>`+
 `<td class="mv${rv?' rev-col rev-end':''} ${varClass(mv)}${dc}"${da(idx,pl)}>${fmtK(mv)}</td>`;
 });
 h += '</tr>';
@@ -783,15 +795,15 @@ const trCls = r.rowType === 'expense' ? 'tr-exp' : '';
 const dc = drill ? ' drill-cell' : '';
 const da = (period, periodLabel) => drill ? ` data-drill="1" data-scope="y" data-row-index="${r.index}" data-period="${period}" data-benchmark="${benchmarkKey}" data-label="${escapeHtml(cleanLabel(r.label))}" data-period-label="${escapeHtml(periodLabel)}"` : '';
 h += `<tr class="${trCls}"><td>${escapeHtml(cleanLabel(r.label))}</td>`+
-`<td class="yw tot-col${dc}"${da('fy','Full year')}>${fmtK(r.total.w)}</td>`+
-`<td class="tot-col${dc}"${da('fy','Full year')}>${fmtK(r.total[benchmarkKey])}</td>`+
+`<td class="yw tot-col${dc}"${da('fy','Full year')}>${fmtKplain(r.total.w)}</td>`+
+`<td class="tot-col${dc}"${da('fy','Full year')}>${fmtKplain(r.total[benchmarkKey])}</td>`+
 `<td class="yv tot-col tot-end ${varClass(fyVar)}${dc}"${da('fy','Full year')}>${fmtK(fyVar)}</td>`;
 r.quarters.forEach((q, idx) => {
 const qVar = q.w - q[benchmarkKey];
 const rv = idx===REVIEW_Q_IDX;
 const pl = q.label || ('Q' + (idx+1));
-h += `<td class="yw${rv?' rev-col rev-start':''}${dc}"${da(idx,pl)}>${fmtK(q.w)}</td>`+
-`<td class="${rv?'rev-col':''}${dc}"${da(idx,pl)}>${fmtK(q[benchmarkKey])}</td>`+
+h += `<td class="yw${rv?' rev-col rev-start':''}${dc}"${da(idx,pl)}>${fmtKplain(q.w)}</td>`+
+`<td class="${rv?'rev-col':''}${dc}"${da(idx,pl)}>${fmtKplain(q[benchmarkKey])}</td>`+
 `<td class="mv${rv?' rev-col rev-end':''} ${varClass(qVar)}${dc}"${da(idx,pl)}>${fmtK(qVar)}</td>`;
 });
 h += '</tr>';
@@ -868,11 +880,11 @@ return `<section class="sec" id="sec-hc">
 <div class="hc-grid">
 <div class="hc-card hc-card-wide hc-work">
 <div class="hc-summary-grid">
-<div class="hc-stat"><div class="kpi-label">Plan Total</div><div class="kpi-val kpi-neu">${fmtK(model.hc.salaryAccrued.planTotal)}</div></div>
-<div class="hc-stat"><div class="kpi-label">Working Total</div><div class="kpi-val ${variance<0?'kpi-fav':'kpi-unfav'}">${fmtK(model.hc.salaryAccrued.workTotal)}</div></div>
+<div class="hc-stat"><div class="kpi-label">Plan Total</div><div class="kpi-val kpi-neu">${fmtKplain(model.hc.salaryAccrued.planTotal)}</div></div>
+<div class="hc-stat"><div class="kpi-label">Working Total</div><div class="kpi-val ${variance<0?'kpi-fav':'kpi-unfav'}">${fmtKplain(model.hc.salaryAccrued.workTotal)}</div></div>
 <div class="hc-stat"><div class="kpi-label">Variance</div><div class="kpi-val ${variance<0?'kpi-fav':variance>0?'kpi-unfav':'kpi-neu'}">${fmtK(variance)}</div><div class="hc-badge-wrap">${varianceBadge(variance)}</div></div>
 </div>
-<div class="mini-kpi hc-quarter-grid">${model.hc.salaryAccrued.q.map((n,i)=>`<div><div class="k">Q${i+1}</div><div class="v">Plan ${fmtK(n)}</div><div class="v2">Working ${fmtK(model.hc.salaryAccrued.qWork[i])}</div></div>`).join('')}</div>
+<div class="mini-kpi hc-quarter-grid">${model.hc.salaryAccrued.q.map((n,i)=>`<div><div class="k">Q${i+1}</div><div class="v">Plan ${fmtKplain(n)}</div><div class="v2">Working ${fmtKplain(model.hc.salaryAccrued.qWork[i])}</div></div>`).join('')}</div>
 </div>
 </div>
 <div class="sublbl">HC movement</div>
@@ -1174,19 +1186,21 @@ const clone = document.documentElement.cloneNode(true);
 if(interactive){
 // Keep interactive controls; only remove things that make no sense in a
 // standalone window (workspace navigation, uploader, batch UI, open drill).
-clone.querySelectorAll('#back-nav, #home-nav, #budget-util-nav, .topbar-actions, #upload-shell, #drill-overlay').forEach(el => el.remove());
+clone.querySelectorAll('#back-nav, #home-nav, #budget-util-nav, .topbar-actions, #upload-shell, #drill-overlay, #fpa-bot-root, #fpa-bot-style').forEach(el => el.remove());
 freezeCanvasesAsImages(clone);
 stripLiveScripts(clone, ['html2canvas', 'jspdf']); // keep PDF libs for in-window export
 inlineCssIntoClone(clone, cssText);
 appendInteractiveScript(clone);
 appendDrillExportScript(clone);
+appendBotExportScript(clone);
 } else {
-clone.querySelectorAll('.hidden, .del-btn, .del-block, .add-act, .mini-btn, .ghost-btn, .topbar-actions, #save-nav, #download-nav, #download-pdf-nav, #back-nav, #home-nav, #drill-overlay, #upload-shell').forEach(el => el.remove());
+clone.querySelectorAll('.hidden, .del-btn, .del-block, .add-act, .mini-btn, .ghost-btn, .topbar-actions, #save-nav, #download-nav, #download-pdf-nav, #back-nav, #home-nav, #drill-overlay, #upload-shell, #fpa-bot-root, #fpa-bot-style').forEach(el => el.remove());
 freezeCanvasesAsImages(clone);
 stripLiveScripts(clone);
 inlineCssIntoClone(clone, cssText);
 appendExportScript(clone);
 appendDrillExportScript(clone);
+appendBotExportScript(clone);
 }
 return '<!DOCTYPE html>\n' + clone.outerHTML;
 }
@@ -1324,6 +1338,7 @@ html
 });
 }
 // Return to the upload shell and show launcher buttons.
+unmountAnalystBot();
 dom.root.classList.add('hidden');
 dom.root.innerHTML = '';
 state.model = null;
@@ -2083,8 +2098,8 @@ return { name: cleanLabel(row.label), gl: glMap[row.index] || '', working: vals.
 function initDrilldown(root, data){
 data = data || { quarter: [], year: [] };
 function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function fmtK(n){ if(!isFinite(n)||n===0) return '—'; var r=Math.round(n/1000); var a=Math.abs(r).toLocaleString('en-US'); return r>0?('+$'+a+'K'):('-$'+a+'K'); }
-function fmtKplain(n){ if(!isFinite(n)||n===0) return '—'; var r=Math.round(n/1000); var a=Math.abs(r).toLocaleString('en-US'); return r<0?('($'+a+'K)'):('$'+a+'K'); }
+function fmtK(n){ if(!isFinite(n)||n===0) return '—'; var r=Math.round(n/1000); if(r===0) return '$0K'; var a=Math.abs(r).toLocaleString('en-US'); return r>0?('+$'+a+'K'):('-$'+a+'K'); }
+function fmtKplain(n){ if(!isFinite(n)||n===0) return '—'; var r=Math.round(n/1000); if(r===0) return '$0K'; var a=Math.abs(r).toLocaleString('en-US'); return r<0?('($'+a+'K)'):('$'+a+'K'); }
 function cleanLabel(s){ return String(s==null?'':s).replace(/^Total\s+/,''); }
 function collect(rows, l2Index, flex){
 var idx=rows.findIndex(function(r){return r.index===l2Index;});
@@ -2126,9 +2141,9 @@ function render(c){
 ctx=Object.assign({mode:'materiality', threshold:25, search:''}, c);
 var overlay=ensure(), panel=document.getElementById('drill-panel');
 panel.innerHTML=''
-+'<div class="drill-hdr"><div><h3>'+esc(c.title)+'</h3><div class="drill-sub">'+esc(c.periodLabel)+' \u00b7 Working vs '+esc(c.benchmarkLabel)+'</div></div><button class="drill-close" id="drill-close">&times;</button></div>'
++'<div class="drill-hdr"><div><h3>'+esc(c.title)+'</h3><div class="drill-sub">'+esc(c.periodLabel)+' · Working vs '+esc(c.benchmarkLabel)+'</div></div><button class="drill-close" id="drill-close">&times;</button></div>'
 +'<div class="drill-controls"><div class="drill-seg"><button class="drill-seg-btn" data-mode="materiality">By materiality</button><button class="drill-seg-btn" data-mode="activity" title="With Activity (excluding zero)">With activity</button><button class="drill-seg-btn" data-mode="all">Show all</button></div>'
-+'<div class="drill-thr" id="drill-thr-wrap"><span>\u00b1\u00a0$</span><input type="number" id="drill-thr" min="0" step="5" value="'+c.threshold+'" /><span>K</span></div></div>'
++'<div class="drill-thr" id="drill-thr-wrap"><span>± $</span><input type="number" id="drill-thr" min="0" step="5" value="'+c.threshold+'" /><span>K</span></div></div>'
 +'<div class="drill-search" id="drill-search-wrap"><i class="ti ti-search"></i><input type="text" id="drill-search" placeholder="Search vendor by id or name..." /></div>'
 +'<div class="drill-body" id="drill-body"></div>';
 panel.querySelector('#drill-close').addEventListener('click', close);
@@ -2153,8 +2168,8 @@ else { shown=all; var q=(ctx.search||'').trim().toLowerCase(); if(q) shown=shown
 var maxVal=Math.max.apply(null,[1].concat(shown.map(function(v){return Math.max(Math.abs(v.working),Math.abs(v.benchmark));})));
 function bar(v){
 var wPct=Math.min(100,Math.abs(v.working)/maxVal*100), bPct=Math.min(100,Math.abs(v.benchmark)/maxVal*100), over=v.variance>0;
-var vu=v.benchmark?((v.variance>0?'+':'')+Math.round(v.variance/v.benchmark*100)+'%'):(v.working?'not in plan':'\u2014');
-return '<div class="drill-bar-row"><div class="drill-bar-top"><span class="drill-bar-left"><span class="drill-bar-name">'+esc(v.name)+'</span>'+(v.gl?'<button class="drill-gl-btn" type="button" title="Show GL account"><i class="ti ti-eye"></i></button>':'')+'</span><span class="drill-bar-fig">'+fmtKplain(v.working)+' / '+fmtKplain(v.benchmark)+'</span></div><div class="drill-track"><div class="drill-fill '+(over?'unfav':'fav')+'" style="width:'+wPct+'%"></div>'+(v.benchmark?'<div class="drill-plan-marker" style="left:'+bPct+'%"></div>':'')+'</div><div class="drill-util '+(over?'var-unfav':'var-fav')+'">'+esc(vu)+' vs '+esc(ctx.benchmarkLabel.toLowerCase())+' \u00b7 '+fmtK(v.variance)+'</div>'+(v.gl?'<div class="drill-gl-line"><i class="ti ti-receipt-2"></i>GL account \u00b7 '+esc(v.gl)+'</div>':'')+'</div>';
+var vu=v.benchmark?((v.variance>0?'+':'')+Math.round(v.variance/v.benchmark*100)+'%'):(v.working?'not in plan':'—');
+return '<div class="drill-bar-row"><div class="drill-bar-top"><span class="drill-bar-left"><span class="drill-bar-name">'+esc(v.name)+'</span>'+(v.gl?'<button class="drill-gl-btn" type="button" title="Show GL account"><i class="ti ti-eye"></i></button>':'')+'</span><span class="drill-bar-fig">'+fmtKplain(v.working)+' / '+fmtKplain(v.benchmark)+'</span></div><div class="drill-track"><div class="drill-fill '+(over?'unfav':'fav')+'" style="width:'+wPct+'%"></div>'+(v.benchmark?'<div class="drill-plan-marker" style="left:'+bPct+'%"></div>':'')+'</div><div class="drill-util '+(over?'var-unfav':'var-fav')+'">'+esc(vu)+' vs '+esc(ctx.benchmarkLabel.toLowerCase())+' · '+fmtK(v.variance)+'</div>'+(v.gl?'<div class="drill-gl-line"><i class="ti ti-receipt-2"></i>GL account · '+esc(v.gl)+'</div>':'')+'</div>';
 }
 var unfav=shown.filter(function(v){return v.variance>0;}).sort(function(a,b){return b.variance-a.variance;});
 var fav=shown.filter(function(v){return v.variance<0;}).sort(function(a,b){return a.variance-b.variance;});
@@ -2165,10 +2180,10 @@ if(fav.length) bars+=gh('fav','Favorable','Savings',fav.length)+fav.map(bar).joi
 if(unfav.length) bars+=gh('unfav','Unfavorable','Overspend',unfav.length)+unfav.map(bar).join('');
 if(neu.length) bars+=gh('neu','No Variance','In line with Plan',neu.length)+neu.map(bar).join('');
 var ct;
-if(ctx.mode==='materiality') ct='Showing '+shown.length+' of '+all.length+' vendors \u00b7 materiality \u00b1 $'+ctx.threshold+'K';
-else if(ctx.mode==='activity') ct='Showing '+shown.length+' of '+all.length+' vendors \u00b7 with activity (excluding zero)';
-else { var q2=(ctx.search||'').trim(); ct=q2?('Showing '+shown.length+' of '+all.length+' vendors \u00b7 search "'+q2+'"'):('Showing all '+all.length+' vendors'); }
-bd.innerHTML='<div class="drill-summary"><div class="ds"><div class="k">Working</div><div class="val">'+fmtKplain(totW)+'</div></div><div class="ds"><div class="k">'+esc(ctx.benchmarkLabel)+'</div><div class="val">'+fmtKplain(totB)+'</div></div><div class="ds"><div class="k">Variance</div><div class="val '+(totVar<0?'kpi-fav':totVar>0?'kpi-unfav':'kpi-neu')+'">'+fmtK(totVar)+'</div></div><div class="ds"><div class="k">Utilization</div><div class="val">'+(util===null?'\u2014':util+'%')+'</div></div></div><div class="drill-count">'+esc(ct)+'</div>'+(shown.length?bars:('<div class="drill-empty">'+(ctx.mode==='materiality'?'No vendors within this materiality range.':'No vendors to display.')+'</div>'));
+if(ctx.mode==='materiality') ct='Showing '+shown.length+' of '+all.length+' vendors · materiality ± $'+ctx.threshold+'K';
+else if(ctx.mode==='activity') ct='Showing '+shown.length+' of '+all.length+' vendors · with activity (excluding zero)';
+else { var q2=(ctx.search||'').trim(); ct=q2?('Showing '+shown.length+' of '+all.length+' vendors · search "'+q2+'"'):('Showing all '+all.length+' vendors'); }
+bd.innerHTML='<div class="drill-summary"><div class="ds"><div class="k">Working</div><div class="val">'+fmtKplain(totW)+'</div></div><div class="ds"><div class="k">'+esc(ctx.benchmarkLabel)+'</div><div class="val">'+fmtKplain(totB)+'</div></div><div class="ds"><div class="k">Variance</div><div class="val '+(totVar<0?'kpi-fav':totVar>0?'kpi-unfav':'kpi-neu')+'">'+fmtK(totVar)+'</div></div><div class="ds"><div class="k">Utilization</div><div class="val">'+(util===null?'—':util+'%')+'</div></div></div><div class="drill-count">'+esc(ct)+'</div>'+(shown.length?bars:('<div class="drill-empty">'+(ctx.mode==='materiality'?'No vendors within this materiality range.':'No vendors to display.')+'</div>'));
 }
 var container=root||document;
 container.addEventListener('click', function(e){ var t=e.target; if(!t||!t.closest) return; var cell=t.closest('[data-drill="1"]'); if(cell) open(cell); });
@@ -2194,6 +2209,54 @@ script.textContent = '(' + initDrilldown.toString() + ')(document, ' + json + ')
 var body = clone.querySelector('body');
 if(body) body.appendChild(script);
 }catch(e){ console.warn('Could not embed drill-down into export.', e); }
+}
+// ---------- FP&A analyst bot (rule-based, see analyst-bot.js) ----------
+// Compact snapshot of the board data the bot needs. Row arrays are [Working, Plan, Forecast].
+function buildBotData(){
+const m = state.model;
+if(!m || !m.year || !m.year.allRows) return null;
+const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+const trip = o => [r2(o && o.w), r2(o && o.p), r2(o && o.f)];
+const rows = m.year.allRows.map(r => ({
+i: r.index, t: r.rowType, l: r.label,
+T: trip(r.total), Q: (r.quarters || []).map(trip), M: (r.months || []).map(trip)
+}));
+const first = m.year.allRows.find(r => r.months && r.months.length === 12);
+const monthLabels = first ? first.months.map(x => x.label) : [];
+const quarterLabels = first ? first.quarters.map(x => x.label) : [];
+const monthIdx = monthLabels.findIndex(l => normalizeMonth(l) === m.meta.monthToken);
+const hc = m.hc ? {
+salary: { planTotal: r2(m.hc.salaryAccrued.planTotal), workTotal: r2(m.hc.salaryAccrued.workTotal), q: m.hc.salaryAccrued.q.map(r2), qWork: m.hc.salaryAccrued.qWork.map(r2) },
+employees: m.hc.employeeRows.map(e => ({ n: e.name, p: r2(e.planTotal), w: r2(e.workTotal), tbh: !!e.isTbh })),
+moves: m.hc.movementCounts
+} : null;
+const te = m.te ? {
+headers: m.te.headers.slice(2, -1),
+rows: m.te.rows.map(r => ({ e: r.employee, v: r.vendor, vals: r.values.map(r2), g: r2(r.grandTotal) })),
+total: { vals: m.te.totalRow.values.map(r2), g: r2(m.te.totalRow.grandTotal) }
+} : null;
+return {
+meta: { code: m.meta.dashboardCode, fy: m.meta.fyToken, month: m.meta.monthToken, quarter: m.meta.currentQuarterLabel,
+planLabel: `${m.meta.fyToken} Plan`, fcstLabel: m.meta.forecastLabel, monthIdx },
+monthLabels, quarterLabels, rows, hc, te, hasOpex: !!m.opex
+};
+}
+function mountAnalystBot(){
+if(typeof initAnalystBot !== 'function') return;
+try{ initAnalystBot(buildBotData()); }catch(e){ console.warn('Could not start the FP&A analyst bot.', e); }
+}
+function unmountAnalystBot(){
+['fpa-bot-root','fpa-bot-style'].forEach(id => { const el = document.getElementById(id); if(el) el.remove(); });
+}
+function appendBotExportScript(clone){
+if(typeof initAnalystBot !== 'function') return;
+try{
+const json = JSON.stringify(buildBotData()).replace(/</g, '\\u003c');
+const script = document.createElement('script');
+script.textContent = '(' + initAnalystBot.toString() + ')(' + json + ');';
+const body = clone.querySelector('body');
+if(body) body.appendChild(script);
+}catch(e){ console.warn('Could not embed the FP&A analyst bot into export.', e); }
 }
 function ensureDrillPanel(){
 let overlay = document.getElementById('drill-overlay');
