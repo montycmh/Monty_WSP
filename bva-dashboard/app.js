@@ -1,16 +1,17 @@
 (function(){
 Chart.register(ChartDataLabels);
 const state = {
-files: { quarter:null, year:null, hc:null, te:null, opex:null },
+files: { quarter:null, year:null, hc:null, te:null, opex:null, nv:null },
 model: null,
 edits: {},
 boardCount: 1,
-boards: [],          // per-board file sets: [{quarter,year,hc,te,opex}, ...]
+boards: [],          // per-board file sets: [{quarter,year,hc,te,opex,nv}, ...]
 generated: [],       // built standalone boards: [{title, subtitle, fileBase, html}, ...]
 openedWindows: new Map() // open individual board windows keyed by board index
 };
 const chartRefs = {};
 let REVIEW_MONTH_IDX = -1, REVIEW_Q_IDX = -1;
+let CURRENT_NV = null; // No Vendor line items of the board being rendered (compact form, see buildNvData)
 const monthOrder = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const fiscalOrder = ['Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec','Jan'];
 const dom = {
@@ -31,10 +32,11 @@ const FEED_DEFS = [
 { key:'year',    title:'YEAR',    sub:'Full-year OPEX feed' },
 { key:'hc',      title:'HC',      sub:'Headcount feed' },
 { key:'te',      title:'T&E',     sub:'Travel & expense feed' },
-{ key:'opex',    title:'OPEX',    sub:'OPEX Feed (optional)' }
+{ key:'opex',    title:'OPEX',    sub:'OPEX Feed (optional)' },
+{ key:'nv',      title:'NO VENDOR', sub:'No Vendor line items (optional)' }
 ];
 // ---------- Dynamic multi-board upload groups ----------
-function emptyFiles(){ return { quarter:null, year:null, hc:null, te:null, opex:null }; }
+function emptyFiles(){ return { quarter:null, year:null, hc:null, te:null, opex:null, nv:null }; }
 function ensureBoards(count){
 while(state.boards.length < count) state.boards.push(emptyFiles());
 state.boards.length = count;
@@ -150,7 +152,7 @@ function resetAll(){
 unmountAnalystBot();
 state.model = null;
 state.edits = {};
-state.files = { quarter:null, year:null, hc:null, te:null, opex:null };
+state.files = { quarter:null, year:null, hc:null, te:null, opex:null, nv:null };
 state.boards = [];
 state.generated = [];
 state.openedWindows.clear();
@@ -162,7 +164,7 @@ if(dom.budgetUtilNav) dom.budgetUtilNav.classList.add('hidden');
 if(dom.launcher){ dom.launcher.classList.add('hidden'); dom.launcher.innerHTML = ''; }
 showError('');
 document.getElementById('upload-shell').classList.remove('hidden');
-dom.sidebarFooter.textContent = 'Upload Quarter and Year feeds to generate a board (HC and T&E optional).';
+dom.sidebarFooter.textContent = 'Upload Quarter and Year feeds to generate a board (HC, T&E, OPEX and No Vendor optional).';
 document.querySelectorAll('aside nav ul li').forEach((li, idx) => li.classList.toggle('active', idx===0));
 setBoardCount(1);
 updateBuildButton();
@@ -204,12 +206,13 @@ dom.buildBtn.innerHTML = '<i class="ti ti-wand"></i> Generate Board';
 }
 }
 async function parseFiles(files){
-const [quarterWb, yearWb, hcWb, teWb, opexWb] = await Promise.all([
+const [quarterWb, yearWb, hcWb, teWb, opexWb, nvWb] = await Promise.all([
 readWorkbook(files.quarter),
 readWorkbook(files.year),
 files.hc ? readWorkbook(files.hc) : Promise.resolve(null),
 files.te ? readWorkbook(files.te) : Promise.resolve(null),
-files.opex ? readWorkbook(files.opex) : Promise.resolve(null)
+files.opex ? readWorkbook(files.opex) : Promise.resolve(null),
+files.nv ? readWorkbook(files.nv) : Promise.resolve(null)
 ]);
 const meta = parseMeta(files.quarter.name);
 const opexMeta = files.opex ? parseOpexMeta(files.opex.name) : null;
@@ -219,7 +222,8 @@ quarter: parseQuarterFeed(quarterWb),
 year: parseYearFeed(yearWb, meta),
 hc: hcWb ? parseHcFeed(hcWb) : null,
 te: teWb ? parseTeFeed(teWb) : null,
-opex: opexWb ? parseOpexFeed(opexWb, opexMeta) : null
+opex: opexWb ? parseOpexFeed(opexWb, opexMeta) : null,
+nv: nvWb ? parseNoVendorFeed(nvWb, files.nv.name) : null
 };
 }
 function readWorkbook(file){
@@ -433,6 +437,243 @@ return { businessUnit, monthToken, yearToken, monthRaw, label: 'OPEX Feed' };
 function parseOpexFeed(wb, meta){
 return { meta: meta || {}, rows: wb.rows, workbook: wb.workbook, sheet: wb.sheet };
 }
+// ---------- No Vendor line-item feed (optional 6th feed) ----------
+// Layout (Pigment "OPEX Line Item" export):
+//   header row A : attribute labels (Account, Vendor, Description, Contract Start Date, Contract End Date, Amount)
+//   header row B : month labels under Amount ("Feb 26", "Mar 26", ...)
+//   header row C : scenario per column (Working, FY27 Plan, 6+6 Forecast)
+// Every attribute repeats once per scenario, because the same line number can hold a
+// different item in each scenario. Items are therefore matched by GL + vendor + description,
+// never by line number.
+function nvCellDate(x){
+if(x === null || x === undefined || x === '') return null;
+if(x instanceof Date) return isNaN(x.getTime()) ? null : x;
+if(typeof x === 'number' && x > 20000 && x < 80000) return new Date(Math.round((x - 25569) * 86400000));
+const s = String(x).trim();
+const m = s.match(/^([A-Za-z]{3,9})[\s\-'_\/]*(\d{2}|\d{4})$/);
+if(m){
+const mi = monthOrder.findIndex(mo => mo.toLowerCase() === m[1].slice(0,3).toLowerCase());
+if(mi < 0) return null;
+const yy = m[2].length === 4 ? Number(m[2]) : 2000 + Number(m[2]);
+return new Date(Date.UTC(yy, mi, 1));
+}
+const t = Date.parse(s);
+return Number.isFinite(t) ? new Date(t) : null;
+}
+// Fiscal ordinal: FY*12 + fiscal month index (Feb = 0 ... Jan = 11). FY27 = Feb-26 .. Jan-27.
+function nvFiscalOrd(dt){
+const mi = dt.getUTCMonth();
+const yy = dt.getUTCFullYear() % 100;
+const fy = mi === 0 ? yy : yy + 1;
+return fy * 12 + fiscalOrder.indexOf(monthOrder[mi]);
+}
+function nvFmtDate(x){
+const dt = nvCellDate(x);
+if(!dt) return '';
+return monthOrder[dt.getUTCMonth()] + ' ' + dt.getUTCDate() + ', ' + dt.getUTCFullYear();
+}
+function parseNoVendorFeed(wb, fileName){
+const rows = wb.rows || [];
+const head = rows.slice(0, 12);
+const attrRowIdx = head.findIndex(r => r.some(c => /^\s*account\s*$/i.test(String(c))));
+const scenRowIdx = head.findIndex(r => r.filter(c => /working|plan|forecast|fcst/i.test(String(c))).length >= 3);
+if(attrRowIdx < 0 || scenRowIdx < 0) throw new Error('No Vendor feed: could not find the Account / scenario header rows. Expected the Pigment "OPEX Line Item" layout.');
+let monthRowIdx = -1;
+for(let r = attrRowIdx; r < scenRowIdx; r++){
+if((rows[r] || []).filter(c => nvCellDate(c) && /[A-Za-z]{3}|^\d{5}$/.test(String(c))).length >= 3){ monthRowIdx = r; break; }
+}
+if(monthRowIdx < 0) throw new Error('No Vendor feed: could not find the month header row (e.g. "Feb 26").');
+const attrRow = rows[attrRowIdx], monthRow = rows[monthRowIdx], scenRow = rows[scenRowIdx];
+const width = Math.max(attrRow.length, monthRow.length, scenRow.length);
+const cols = [];
+let curAttr = '', curMonth = null;
+for(let c = 0; c < width; c++){
+const a = String(attrRow[c] || '').trim();
+if(a) curAttr = a.toLowerCase();
+const mcell = monthRow[c];
+if(mcell !== '' && mcell !== undefined && mcell !== null){ const dt = nvCellDate(mcell); curMonth = dt ? nvFiscalOrd(dt) : null; }
+const sc = String(scenRow[c] || '');
+const scen = /working/i.test(sc) ? 'w' : /forecast|fcst/i.test(sc) ? 'f' : /plan|budget/i.test(sc) ? 'p' : null;
+if(!scen || !curAttr) continue;
+let attr = null;
+if(/^account/.test(curAttr)) attr = 'account';
+else if(/^vendor/.test(curAttr)) attr = 'vendor';
+else if(/^desc/.test(curAttr)) attr = 'desc';
+else if(/start/.test(curAttr)) attr = 'start';
+else if(/end/.test(curAttr)) attr = 'end';
+else if(/amount|value/.test(curAttr)) attr = 'amount';
+if(!attr) continue;
+if(attr === 'amount' && curMonth === null) continue;
+cols.push({ c, attr, scen, ord: attr === 'amount' ? curMonth : null });
+}
+if(!cols.some(x => x.attr === 'amount')) throw new Error('No Vendor feed: no monthly Amount columns were found.');
+let bu = '';
+const entries = [];
+for(let i = scenRowIdx + 1; i < rows.length; i++){
+const r = rows[i] || [];
+const c0 = String(r[0] || '').trim(), c1 = String(r[1] || '').trim();
+if(/^total$/i.test(c0) || /^total$/i.test(c1)) continue;
+if(c0 && !bu) bu = c0;
+['w','p','f'].forEach(s => {
+const pick = attr => { const col = cols.find(x => x.scen === s && x.attr === attr); return col ? r[col.c] : ''; };
+const account = String(pick('account') || '').trim();
+if(!account) return;
+const amounts = {};
+cols.filter(x => x.scen === s && x.attr === 'amount').forEach(x => {
+const val = v(r[x.c]);
+if(Math.abs(val) >= 0.005) amounts[x.ord] = (amounts[x.ord] || 0) + val;
+});
+entries.push({
+s, account,
+vendor: String(pick('vendor') || '').trim(),
+desc: String(pick('desc') || '').trim(),
+start: nvFmtDate(pick('start')),
+end: nvFmtDate(pick('end')),
+amounts
+});
+});
+}
+return { fileName: fileName || '', bu, entries };
+}
+function nvGlCode(label){ const m = String(label || '').match(/^\s*(\d{5,})/); return m ? m[1] : ''; }
+function nvKey(s){ return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+// Joins the line items with the board: board FY months, coverage per scenario,
+// validations, and the No Vendor rows of the Year feed (per GL) for reconciliation.
+function buildNoVendorModel(nvParsed, meta, yearRows, monthLabels){
+const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+const warnings = [], notes = [];
+const fyNum = parseInt(String(meta.fyToken || '').replace(/\D/g, ''), 10);
+const rm = fiscalOrder.indexOf(meta.monthToken);
+if(!Number.isFinite(fyNum)) warnings.push('Could not read the fiscal year from the Quarter filename, so the No Vendor feed months cannot be aligned to the board.');
+const base = fyNum * 12;
+const firstOrd = s => { let o = null; nvParsed.entries.forEach(e => { if(e.s !== s) return; Object.keys(e.amounts).forEach(k => { const n = Number(k); if(o === null || n < o) o = n; }); }); return o; };
+const wOrd = firstOrd('w'), fOrd = firstOrd('f');
+const toIdx = o => o === null ? null : o - base;
+const label = i => (i === null || i === undefined) ? '—' : (i >= 0 && i < 12 ? (monthLabels[i] || fiscalOrder[i]) : (i >= 12 ? fiscalOrder[i - 12] + ' (next FY)' : fiscalOrder[(i % 12 + 12) % 12] + ' (prior FY)'));
+const wStart = toIdx(wOrd), fStart = toIdx(fOrd);
+if(rm >= 0 && wStart !== null && wStart !== rm + 1){
+warnings.push(`Working line items start in ${label(wStart)}, but this board is ${meta.monthToken} ${meta.fyToken} (expected ${label(rm + 1)}). The No Vendor feed may be from a different close.`);
+}
+if(wStart === null) notes.push('The No Vendor feed has no Working amounts, so only Plan and Forecast lines can be shown.');
+if(wStart !== null && fStart !== null && wStart - fStart > 1){
+notes.push(`Previous forecast not refreshed yet: it projects from ${label(fStart)}, Working from ${label(wStart)}. ${label(fStart)}–${label(wStart - 1)} have Forecast line items but Working is actuals with no line detail.`);
+} else if(wStart !== null && fStart !== null && fStart > wStart){
+notes.push(`Forecast line items start in ${label(fStart)}, after Working (${label(wStart)}).`);
+}
+const code = String(meta.dashboardCode || '');
+const buNorm = nvKey(String(nvParsed.bu).replace(/^\d+\s*-\s*/, ''));
+const codeNorm = nvKey(code.replace(/^\d+\s*-\s*/, ''));
+const buNum = (String(nvParsed.bu).match(/^\d+/) || [''])[0];
+const fileNorm = nvKey(nvParsed.fileName);
+const buOk = !nvParsed.bu || !codeNorm || buNorm.indexOf(codeNorm) >= 0 || codeNorm.indexOf(buNorm) >= 0 || fileNorm.indexOf(codeNorm) === 0 || (buNum && code.indexOf(buNum) >= 0);
+if(!buOk) warnings.push(`The No Vendor feed is for "${nvParsed.bu}" but the board is "${code}". Check that the right file was uploaded.`);
+
+// Board side: No Vendor rows of the Year feed, per GL code, plus GL label and category.
+const glInfo = {}, order = [];
+let pendingV = [], pendingG = [];
+(yearRows || []).forEach(r => {
+if(r.rowType === 'vendor' || r.rowType === 'novendor'){ pendingV.push(r); return; }
+if(r.rowType === 'gl'){
+const c = nvGlCode(r.label);
+if(c && !glInfo[c]){ glInfo[c] = { code:c, label:r.label, cat:'', board:null }; order.push(c); }
+pendingV.forEach(x => {
+if(x.rowType !== 'novendor' || !c) return;
+const g = glInfo[c];
+if(!g.board) g.board = { w:new Array(12).fill(0), p:new Array(12).fill(0), f:new Array(12).fill(0) };
+(x.months || []).forEach((m, k) => { g.board.w[k] += m.w; g.board.p[k] += m.p; g.board.f[k] += m.f; });
+});
+pendingV = []; if(c) pendingG.push(c); return;
+}
+if(r.rowType === 'l2'){ pendingG.forEach(c => { glInfo[c].cat = cleanLabel(r.label); }); pendingG = []; pendingV = []; }
+});
+
+// Line items: keep board-FY months, merge scenarios by GL + vendor + description.
+const items = {}, itemOrder = [];
+nvParsed.entries.forEach(e => {
+const arr = new Array(12).fill(0);
+let any = false;
+Object.keys(e.amounts).forEach(k => { const i = Number(k) - base; if(i >= 0 && i < 12){ arr[i] += e.amounts[k]; any = true; } });
+if(!any) return;
+const gl = nvGlCode(e.account);
+const isNV = !e.vendor || /^no vendor/i.test(e.vendor);
+const vend = isNV ? 'No Vendor' : e.vendor.replace(/^\d+\s*-\s*/, '').trim();
+const key = gl + '|' + (isNV ? 'nv' : nvKey(e.vendor)) + '|' + nvKey(e.desc);
+let it = items[key];
+if(!it){ it = items[key] = { key, gl, account:e.account, vendor:vend, nv:isNV, d:e.desc || '(no description)', w:new Array(12).fill(0), p:new Array(12).fill(0), f:new Array(12).fill(0), dt:{} }; itemOrder.push(key); }
+arr.forEach((x, k) => { it[e.s][k] += x; });
+if(e.start || e.end) it.dt[e.s] = (e.start || '?') + ' – ' + (e.end || '?');
+if(gl && !glInfo[gl]){ glInfo[gl] = { code:gl, label:e.account, cat:'', board:null, notInYear:true }; order.push(gl); }
+});
+const missing = order.filter(c => glInfo[c].notInYear);
+if(missing.length) warnings.push(`GL account${missing.length > 1 ? 's' : ''} ${missing.join(', ')} from the No Vendor feed ${missing.length > 1 ? 'are' : 'is'} not in the Year feed, so ${missing.length > 1 ? 'they' : 'it'} cannot be reconciled.`);
+const gls = order.map(c => {
+const g = glInfo[c];
+const its = itemOrder.map(k => items[k]).filter(it => it.gl === c).map(it => ({
+d:it.d, v:it.vendor, nv:it.nv, w:it.w.map(r2), p:it.p.map(r2), f:it.f.map(r2),
+dt: it.dt.w || it.dt.f || it.dt.p || ''
+}));
+return { code:c, label:g.label, cat:g.cat, board: g.board ? { w:g.board.w.map(r2), p:g.board.p.map(r2), f:g.board.f.map(r2) } : null, items:its };
+}).filter(g => g.items.length || (g.board && g.board.w.concat(g.board.p, g.board.f).some(x => Math.abs(x) >= 0.5)));
+return {
+file: nvParsed.fileName, bu: nvParsed.bu, rm, wStart, fStart,
+months: (monthLabels && monthLabels.length === 12) ? monthLabels.slice() : fiscalOrder.slice(),
+warnings, notes, gls
+};
+}
+// Pure helpers shared by the board, the drill-down and the exported HTML.
+// They are serialized with toString(), so they must not reference anything outside their body.
+function nvSlice(NV, code, months, bk){
+var g = null, i;
+if(!NV || !NV.gls) return null;
+for(i = 0; i < NV.gls.length; i++){ if(NV.gls[i].code === code){ g = NV.gls[i]; break; } }
+if(!g) return null;
+function sum(a, ms){ var s = 0; ms.forEach(function(m){ s += (a && a[m]) || 0; }); return s; }
+var rm = NV.rm, fs = (NV.fStart === null || NV.fStart === undefined) ? 99 : NV.fStart;
+var proj = months.filter(function(m){ return m > rm; }), closed = months.filter(function(m){ return m <= rm; });
+function det(ms){ return bk === 'f' ? ms.filter(function(m){ return m >= fs; }) : ms; }
+var bd = g.board || { w:[], p:[], f:[] };
+var P = { months:proj, rows:[], detW:0, detB:0, boardW:sum(bd.w, proj), boardB:sum(bd[bk], proj) };
+var C = { months:closed, detMonths:det(closed), rows:[], boardW:sum(bd.w, closed), boardB:sum(bd[bk], closed), detB:0 };
+var V = [];
+g.items.forEach(function(it){
+if(!it.nv){ var vw = sum(it.w, proj), vb = sum(it[bk], det(months)); if(Math.abs(vw) >= 0.5 || Math.abs(vb) >= 0.5) V.push({ it:it, w:vw, b:vb }); return; }
+var w = sum(it.w, proj), b = sum(it[bk], det(proj));
+if(Math.abs(w) >= 0.5 || Math.abs(b) >= 0.5){ P.rows.push({ it:it, w:w, b:b, v:w - b }); P.detW += w; P.detB += b; }
+var cb = sum(it[bk], C.detMonths);
+if(Math.abs(cb) >= 0.5){ C.rows.push({ it:it, b:cb }); C.detB += cb; }
+});
+P.rows.sort(function(a, b){ return Math.abs(b.v) - Math.abs(a.v); });
+C.rows.sort(function(a, b){ return Math.abs(b.b) - Math.abs(a.b); });
+P.unW = P.boardW - P.detW; P.unB = P.boardB - P.detB;
+C.unB = sum(bd[bk], C.detMonths) - C.detB;
+return { gl:g, proj:P, closed:C, vend:V };
+}
+function nvMiniHtml(NV, code, months, bk){
+var s = nvSlice(NV, code, months, bk);
+if(!s) return '';
+function esc(x){ return String(x == null ? '' : x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function k(n, signed){ if(!isFinite(n) || Math.abs(n) < (signed ? 1 : 0.5)) return '—'; var a = Math.abs(n), t = a >= 1000 ? '$' + (a / 1000).toFixed(a >= 100000 ? 0 : 1) + 'K' : '$' + Math.round(a); if(signed) return (n > 0 ? '+' : '-') + t; return n < 0 ? '(' + t + ')' : t; }
+function vc(n){ return Math.abs(n) < 500 ? 'var-neu' : n < 0 ? 'var-fav' : 'var-unfav'; }
+function rng(ms){ var L = NV.months || []; if(!ms.length) return ''; return ms.length === 1 ? L[ms[0]] : L[ms[0]] + '–' + L[ms[ms.length - 1]]; }
+var bl = bk === 'f' ? 'FCST' : 'Plan', h = '<div class="nv-mini">';
+if(s.proj.months.length){
+h += '<div class="nv-mini-h">' + esc(rng(s.proj.months)) + ' · projected line items</div>';
+if(s.proj.rows.length || Math.abs(s.proj.unW) >= 0.5 || Math.abs(s.proj.unB) >= 0.5){
+h += '<table class="nv-mini-t"><thead><tr><th></th><th>Working</th><th>' + bl + '</th><th>Var</th></tr></thead><tbody>';
+s.proj.rows.forEach(function(r){
+var tagTxt = Math.abs(r.b) < 0.5 ? 'not in ' + bl : Math.abs(r.w) < 0.5 ? 'no Working' : '';
+h += '<tr><td>' + esc(r.it.d) + (tagTxt ? ' <span class="nv-tag">' + tagTxt + '</span>' : '') + '</td><td>' + k(r.w) + '</td><td>' + k(r.b) + '</td><td class="' + vc(r.v) + '">' + k(r.v, true) + '</td></tr>';
+});
+if(Math.abs(s.proj.unW) >= 0.5 || Math.abs(s.proj.unB) >= 0.5) h += '<tr class="nv-un"><td>Not explained by line items</td><td>' + k(s.proj.unW) + '</td><td>' + k(s.proj.unB) + '</td><td class="' + vc(s.proj.unW - s.proj.unB) + '">' + k(s.proj.unW - s.proj.unB, true) + '</td></tr>';
+h += '</tbody></table>';
+} else h += '<div class="nv-mini-note">No projected line items in this period.</div>';
+}
+if(s.closed.months.length){
+var cv = s.closed.boardW - s.closed.boardB;
+h += '<div class="nv-mini-note"><b>' + esc(rng(s.closed.months)) + ' actuals:</b> ' + k(s.closed.boardW) + ' vs ' + bl + ' ' + k(s.closed.boardB) + ' (<span class="' + vc(cv) + '">' + k(cv, true) + '</span>). Actuals carry no line detail' + (s.closed.rows.length ? '; planned lines: ' + s.closed.rows.slice(0, 4).map(function(r){ return esc(r.it.d) + ' ' + k(r.b); }).join(', ') + (s.closed.rows.length > 4 ? ', …' : '') : '') + '.</div>';
+}
+return h + '</div>';
+}
 function deriveModel(parsed){
 const quarterExpense = parsed.quarter.dataRows.find(r => r.rowType === 'expense');
 const yearExpense = parsed.year.dataRows.find(r => r.rowType === 'expense');
@@ -451,10 +692,16 @@ const quarterTopPlan = rankTop(quarterPlanVar, 3);
 const quarterTopFcst = rankTop(quarterFcstVar, 3);
 const yearTopPlan = rankTop(yearPlanVar, 3);
 const yearTopFcst = rankTop(yearFcstVar, 3);
-const quarterDriverBlocksPlan = deriveQuarterDriverBlocks(parsed.quarter, quarterPlanVar, 'p', 35000);
-const quarterDriverBlocksFcst = deriveQuarterDriverBlocks(parsed.quarter, quarterFcstVar, 'f', 35000);
-const yearDriverBlocksPlan = deriveYearDriverBlocks(parsed.year, yearPlanVar, 'p', 75000);
-const yearDriverBlocksFcst = deriveYearDriverBlocks(parsed.year, yearFcstVar, 'f', 75000);
+const qIdx = Math.max(0, quarterNum(parsed.quarter.quarterHeader));
+const quarterMonths = [qIdx * 3, qIdx * 3 + 1, qIdx * 3 + 2];
+const yearMonths = [0,1,2,3,4,5,6,7,8,9,10,11];
+const quarterDriverBlocksPlan = deriveQuarterDriverBlocks(parsed.quarter, quarterPlanVar, 'p', 35000, quarterMonths);
+const quarterDriverBlocksFcst = deriveQuarterDriverBlocks(parsed.quarter, quarterFcstVar, 'f', 35000, quarterMonths);
+const yearDriverBlocksPlan = deriveYearDriverBlocks(parsed.year, yearPlanVar, 'p', 75000, yearMonths);
+const yearDriverBlocksFcst = deriveYearDriverBlocks(parsed.year, yearFcstVar, 'f', 75000, yearMonths);
+const yearFirst = parsed.year.dataRows.find(r => r.months && r.months.length === 12);
+const yearMonthLabels = yearFirst ? yearFirst.months.map((x, i) => normalizeMonth(x.label) || fiscalOrder[i]) : fiscalOrder.slice();
+const nv = parsed.nv ? buildNoVendorModel(parsed.nv, parsed.meta, parsed.year.dataRows, yearMonthLabels) : null;
 const hc = parsed.hc ? deriveHc(parsed.hc) : null;
 const trend = deriveTrend(parsed.year, parsed.meta.monthToken, yearExpense.label);
 const te = parsed.te ? deriveTe(parsed.te) : null;
@@ -501,6 +748,7 @@ driverBlocksFcst: yearDriverBlocksFcst
 hc,
 te,
 opex: parsed.opex || null,
+nv,
 actions
 };
 }
@@ -511,29 +759,34 @@ const totalVar = rows.reduce((s,r)=>s+r.variance,0);
 const others = totalVar - top.reduce((s,r)=>s+r.variance,0);
 return { rows: top, others, totalVar };
 }
-function deriveQuarterDriverBlocks(q, rows, benchmarkKey, threshold){
+function deriveQuarterDriverBlocks(q, rows, benchmarkKey, threshold, months){
 const qualified = rows.filter(r => Math.abs(r.variance) > threshold);
 return qualified.map(r => ({
 id: slug('q-' + r.index + '-' + benchmarkKey + '-' + r.label),
 label: r.label,
 variance: r.variance,
 benchmarkKey,
-vendors: extractQuarterVendors(q.dataRows, r, benchmarkKey),
+months,
+vendors: extractQuarterVendors(q.dataRows, r, benchmarkKey, 'quarter'),
 comments: []
 }));
 }
-function deriveYearDriverBlocks(y, rows, benchmarkKey, threshold){
+// Full-year blocks now list the real vendor rows of the category (same logic as the
+// quarter blocks) instead of a single "No Vendor -" placeholder carrying the whole variance.
+function deriveYearDriverBlocks(y, rows, benchmarkKey, threshold, months){
 return rows.filter(r => Math.abs(r.variance) > threshold).map(r => ({
 id: slug('y-' + r.index + '-' + benchmarkKey + '-' + r.label),
 label: r.label,
 variance: r.variance,
 benchmarkKey,
-vendors: [{ name:'No Vendor -', variance:r.variance, comment: summarizeVariance(r.label, r.variance, 'full-year') }],
+months,
+vendors: extractQuarterVendors(y.dataRows, r, benchmarkKey, 'full-year'),
 comments: []
 }));
 }
-function extractQuarterVendors(dataRows, targetRow, benchmarkKey){
+function extractQuarterVendors(dataRows, targetRow, benchmarkKey, scopeWord){
 const idx = dataRows.findIndex(r => r.index === targetRow.index);
+const glMap = buildGlMap(dataRows);
 const vendors = [];
 for(let i = idx - 1; i >= 0; i--){
 const row = dataRows[i];
@@ -541,10 +794,14 @@ if(row.rowType === 'l2' || row.rowType === 'expense') break;
 if(row.rowType === 'vendor' || row.rowType === 'novendor'){
 const bench = row.total[benchmarkKey] || 0;
 const variance = row.total.w - bench;
+const gl = glMap[row.index] || '';
 vendors.push({
 name: row.label,
 variance,
-comment: summarizeVariance(row.label, variance, 'quarter')
+gl,
+isNV: row.rowType === 'novendor',
+glCode: nvGlCode(gl),
+comment: summarizeVariance(row.rowType === 'novendor' && gl ? 'No Vendor in ' + gl : row.label, variance, scopeWord || 'quarter')
 });
 }
 }
@@ -628,6 +885,7 @@ function renderDashboard(model){
 document.getElementById('upload-shell').classList.add('hidden');
 REVIEW_MONTH_IDX = model.quarter.monthLabels.findIndex(m => normalizeMonth(m) === model.meta.monthToken);
 REVIEW_Q_IDX = quarterNum(model.meta.currentQuarterLabel);
+CURRENT_NV = model.nv;
 const html = `
 <style>
 #dashboard-root th.tot-col{ background:#e0e7ff !important; color:#312e81 !important; }
@@ -650,6 +908,7 @@ ${renderVarianceSection('sec-qplan', `${model.meta.currentQuarterLabel} vs ${mod
 ${renderVarianceSection('sec-qfcst', `${model.meta.currentQuarterLabel} vs ${model.meta.forecastLabel}`, model.quarter.topFcst, model.quarter.driverBlocksFcst, model.quarter.l2Rows, 'f', model.quarter.monthLabels, model.quarter.expense.total.w, model.quarter.expense.total.f, model.meta.forecastLabel, model.quarter.expense)}
 ${renderYearSection('sec-fyplan', `Full Year vs ${model.meta.fyToken} Plan`, model.year.topPlan, model.year.driverBlocksPlan, model.year.l2Rows, 'p', model.year.expense.total.w, model.year.expense.total.p, `${model.meta.fyToken} Plan`, model.year.expense)}
 ${renderYearSection('sec-fyfcst', `Full Year vs ${model.meta.forecastLabel}`, model.year.topFcst, model.year.driverBlocksFcst, model.year.l2Rows, 'f', model.year.expense.total.w, model.year.expense.total.f, model.meta.forecastLabel, model.year.expense)}
+${renderNoVendor(model)}
 ${renderTE(model)}
 ${renderHC(model)}
 ${renderActions(model)}
@@ -824,7 +1083,7 @@ return `<div class="drv-block ${block.variance < 0 ? 'fav-block':'unfav-block'}"
 </div>
 <div class="drv-right" data-comment-container="${block.id}">
 <div class="drv-vendors-hdr">Vendor Drivers</div>
-${block.vendors.map((v,i) => renderVendorRow(block.id, i, v)).join('')}
+${block.vendors.map((v,i) => renderVendorRow(block.id, i, v, block)).join('')}
 <div class="inline-add">
 <input class="add-comment-input" data-add-input="${block.id}" placeholder="Add comment row..." />
 <button class="mini-btn" data-add-comment="${block.id}"><i class="ti ti-plus"></i></button>
@@ -834,12 +1093,19 @@ ${block.vendors.map((v,i) => renderVendorRow(block.id, i, v)).join('')}
 </div>
 </div>`;
 }
-function renderVendorRow(blockId, idx, vendor){
+function renderVendorRow(blockId, idx, vendor, block){
 const rowId = `${blockId}-${idx}`;
+const glTag = vendor.isNV && vendor.gl ? ` <span class="vrow-gl">· ${escapeHtml(vendor.gl)}</span>` : '';
+let nvDetail = '';
+if(vendor.isNV && vendor.glCode && CURRENT_NV && block && block.months){
+const mini = nvMiniHtml(CURRENT_NV, vendor.glCode, block.months, block.benchmarkKey);
+if(mini) nvDetail = `<details class="nv-inline"><summary><i class="ti ti-list-details"></i> No Vendor line items</summary>${mini}</details>`;
+}
 return `<div class="vrow" id="${rowId}-row">
 <span style="width:8px;height:8px;border-radius:50%;background:${vendor.variance<0?'#16a34a':'#e11d48'};flex-shrink:0;margin-top:3px"></span>
 <div style="flex:1;min-width:0">
-<p style="font-size:11.5px;font-weight:600;color:#0f172a;margin-bottom:3px">${escapeHtml(vendor.name)}</p>
+<p style="font-size:11.5px;font-weight:600;color:#0f172a;margin-bottom:3px">${escapeHtml(vendor.name)}${glTag}</p>
+${nvDetail}
 <textarea class="vedit" rows="2" data-persist="comment:${rowId}">${escapeHtml(vendor.comment || '')}</textarea>
 </div>
 <span style="font-size:12px;font-weight:600;color:${vendor.variance<0?'#16a34a':'#e11d48'};flex-shrink:0;margin-top:2px;min-width:48px;text-align:right">${fmtK(vendor.variance)}</span>
@@ -849,6 +1115,129 @@ return `<div class="vrow" id="${rowId}-row">
 function renderAdditionalComments(id){
 return [].map(i => `<div class="comment-row" id="${id}-${i}-row"><textarea class="vedit" rows="2" data-persist="comment:${id}-${i}" placeholder="Additional comment..."></textarea><button class="del-btn" data-del-row="${id}-${i}"><i class="ti ti-trash"></i></button></div>`).join('') +
 `<div class="inline-add"><input class="add-comment-input" data-add-input="${id}" placeholder="Add comment row..." /><button class="mini-btn" data-add-comment="${id}"><i class="ti ti-plus"></i></button></div>`;
+}
+// ---------- No Vendor Detail section ----------
+// Line amounts are small, so they use one decimal in K (the rest of the board rounds to whole K).
+function nvK(n, signed){
+if(!Number.isFinite(n) || Math.abs(n) < (signed ? 1 : 0.5)) return '—';
+const a = Math.abs(n);
+const t = a >= 1000 ? '$' + (a / 1000).toFixed(a >= 100000 ? 0 : 1) + 'K' : '$' + Math.round(a);
+if(signed) return (n > 0 ? '+' : '-') + t;
+return n < 0 ? '(' + t + ')' : t;
+}
+function nvVarClass(n){ return Math.abs(n) < 500 ? 'var-neu' : n < 0 ? 'var-fav' : 'var-unfav'; }
+function renderNoVendor(model){
+const NV = model.nv;
+const hdr = tag => `<div class="sec-hdr"><div class="sec-hdr-left"><span class="sec-ic"><i class="ti ti-list-details"></i></span><span class="sec-title">No Vendor Detail</span></div><span class="sec-tag">${escapeHtml(tag)}</span></div>`;
+if(!NV){
+return `<section class="sec" id="sec-nv">${hdr('No feed loaded')}<div class="comment-block" style="text-align:center;padding:30px 16px;color:#64748b;font-size:14px;font-weight:600"><i class="ti ti-info-circle" style="font-size:20px;display:block;margin-bottom:8px;color:#94a3b8"></i>Upload the optional NO VENDOR feed to see the line items behind the "No Vendor" amounts.</div></section>`;
+}
+const all = [0,1,2,3,4,5,6,7,8,9,10,11];
+const rm = NV.rm;
+const proj = all.filter(m => m > rm), closed = all.filter(m => m <= rm);
+const L = NV.months;
+const rng = ms => !ms.length ? '—' : (ms.length === 1 ? L[ms[0]] : `${L[ms[0]]}–${L[ms[ms.length - 1]]}`);
+const fs = (NV.fStart === null || NV.fStart === undefined) ? 99 : NV.fStart;
+const from = i => (i === null || i === undefined || i > 11) ? [] : all.filter(m => m >= Math.max(0, i));
+const sumM = (a, ms) => ms.reduce((s, m) => s + ((a && a[m]) || 0), 0);
+const fProj = proj.filter(m => m >= fs);
+const fClosed = closed.filter(m => m >= fs);
+
+let h = `<section class="sec" id="sec-nv">${hdr(`${NV.bu || 'No Vendor feed'} · ${NV.file || ''}`)}`;
+h += `<div class="nv-cov">
+<span class="nv-chip"><i class="ti ti-calendar-check"></i> Working detail: <b>${escapeHtml(rng(from(NV.wStart)))}</b></span>
+<span class="nv-chip"><i class="ti ti-target"></i> Plan detail: <b>${escapeHtml(rng(all))}</b></span>
+<span class="nv-chip"><i class="ti ti-chart-dots-3"></i> Forecast detail: <b>${escapeHtml(rng(from(NV.fStart)))}</b></span>
+<span class="nv-chip nv-chip-dim">Closed months (${escapeHtml(rng(closed))}) are actuals with no line detail</span>
+</div>`;
+NV.warnings.forEach(w => { h += `<div class="nv-alert warn"><i class="ti ti-alert-triangle"></i><span>${escapeHtml(w)}</span></div>`; });
+NV.notes.forEach(n => { h += `<div class="nv-alert info"><i class="ti ti-info-circle"></i><span>${escapeHtml(n)}</span></div>`; });
+
+// Totals for the accounts the feed covers (GLs with No Vendor line items). Accounts with
+// No Vendor amounts but no line items (e.g. payroll) are listed separately at the end.
+let tW = 0, tP = 0, tPW = 0, tPdet = 0, oW = 0, oN = 0;
+NV.gls.forEach(g => {
+const hasNv = g.items.some(it => it.nv);
+if(g.board && hasNv){ tW += sumM(g.board.w, all); tP += sumM(g.board.p, all); tPW += sumM(g.board.w, proj); }
+else if(g.board && !g.items.length){ oW += sumM(g.board.w, all); oN++; }
+g.items.filter(it => it.nv).forEach(it => { tPdet += sumM(it.w, proj); });
+});
+const covered = tPW ? Math.round(tPdet / tPW * 1000) / 10 : null;
+const kpi = (k, val, sub, cls) => `<div class="nv-kpi"><span class="k">${k}</span><span class="v">${val}</span><span class="s ${cls || ''}">${sub}</span></div>`;
+h += `<div class="nv-kpis">
+${kpi('No Vendor · FY Working', fmtKplain(tW), 'accounts with line items')}
+${kpi('No Vendor · FY Plan', fmtKplain(tP), `${fmtK(tW - tP)} vs Plan`, varClass(tW - tP))}
+${kpi(`Projected ${escapeHtml(rng(proj))}`, nvK(tPW), 'No Vendor Working, same accounts')}
+${kpi('Explained by line items', nvK(tPdet), covered === null ? '—' : `${covered}% of projected`)}
+</div>`;
+if(oN) h += `<div class="nv-other">Other No Vendor amounts without line items: <b>${fmtKplain(oW)}</b> FY Working in ${oN} account${oN > 1 ? 's' : ''} (listed at the end).</div>`;
+
+const withItems = NV.gls.filter(g => g.items.length);
+const noDetail = NV.gls.filter(g => !g.items.length && g.board);
+withItems.forEach(g => {
+const nvItems = g.items.filter(it => it.nv), vItems = g.items.filter(it => !it.nv);
+const bd = g.board;
+const fyW = bd ? sumM(bd.w, all) : 0, fyP = bd ? sumM(bd.p, all) : 0;
+const sP = nvSlice(NV, g.code, all, 'p'), sF = nvSlice(NV, g.code, all, 'f');
+h += `<div class="nv-gl" id="nv-${escapeHtml(g.code)}-wrap" data-gl-label="${escapeHtml(g.label)}">
+<div class="nv-gl-hdr"><div><div class="nv-gl-title">${escapeHtml(g.label)}</div><div class="nv-gl-sub">${escapeHtml(g.cat || 'Category not found in Year feed')}${bd ? '' : ' · not in Year feed'}</div></div>
+${bd ? `<div class="nv-gl-fig"><span>FY No Vendor</span><b>${fmtKplain(fyW)}</b> vs Plan ${fmtKplain(fyP)} <span class="${varClass(fyW - fyP)}">${fmtK(fyW - fyP)}</span></div>` : ''}</div>`;
+if(proj.length){
+const rows = nvItems.map(it => {
+const w = sumM(it.w, proj), p = sumM(it.p, proj), f = sumM(it.f, fProj);
+return { it, w, p, f };
+}).filter(r => Math.abs(r.w) >= 0.5 || Math.abs(r.p) >= 0.5 || Math.abs(r.f) >= 0.5)
+.sort((a, b) => Math.abs(b.w - b.p) - Math.abs(a.w - a.p));
+const dW = rows.reduce((s, r) => s + r.w, 0), dP = rows.reduce((s, r) => s + r.p, 0), dF = rows.reduce((s, r) => s + r.f, 0);
+const bW = sP.proj.boardW, bP = sP.proj.boardB, bF = sF.proj.boardB;
+h += `<div class="sublbl nv-sublbl">Projected · ${escapeHtml(rng(proj))}</div><div class="tbl-wrap"><table class="nv-t"><thead><tr><th>Line item</th><th>Working</th><th>Plan</th><th>Var vs Plan</th><th>Forecast</th><th>Var vs FCST</th></tr></thead><tbody>`;
+if(!rows.length) h += `<tr><td colspan="6" class="nv-none">No projected No Vendor line items for this account.</td></tr>`;
+rows.forEach(r => {
+const tagTxt = Math.abs(r.p) < 0.5 && Math.abs(r.w) >= 0.5 ? 'Not in Plan' : Math.abs(r.w) < 0.5 && Math.abs(r.p) >= 0.5 ? 'No Working' : '';
+h += `<tr><td><div class="nv-item">${escapeHtml(r.it.d)}${tagTxt ? ` <span class="nv-tag">${tagTxt}</span>` : ''}</div>${r.it.dt ? `<small>Contract ${escapeHtml(r.it.dt)}</small>` : ''}</td><td>${nvK(r.w)}</td><td>${nvK(r.p)}</td><td class="${nvVarClass(r.w - r.p)}">${nvK(r.w - r.p, true)}</td><td>${nvK(r.f)}</td><td class="${nvVarClass(r.w - r.f)}">${nvK(r.w - r.f, true)}</td></tr>`;
+});
+if(rows.length) h += `<tr class="nv-sum"><td>Line items total</td><td>${nvK(dW)}</td><td>${nvK(dP)}</td><td class="${nvVarClass(dW - dP)}">${nvK(dW - dP, true)}</td><td>${nvK(dF)}</td><td class="${nvVarClass(dW - dF)}">${nvK(dW - dF, true)}</td></tr>`;
+if(bd){
+h += `<tr class="nv-board"><td>No Vendor per Year feed</td><td>${nvK(bW)}</td><td>${nvK(bP)}</td><td class="${nvVarClass(bW - bP)}">${nvK(bW - bP, true)}</td><td>${nvK(bF)}</td><td class="${nvVarClass(bW - bF)}">${nvK(bW - bF, true)}</td></tr>`;
+const uW = bW - dW, uP = bP - dP, uF = bF - dF;
+if(Math.abs(uW) >= 0.5 || Math.abs(uP) >= 0.5 || Math.abs(uF) >= 0.5) h += `<tr class="nv-un"><td>Not explained by line items</td><td>${nvK(uW)}</td><td>${nvK(uP)}</td><td class="${nvVarClass(uW - uP)}">${nvK(uW - uP, true)}</td><td>${nvK(uF)}</td><td class="${nvVarClass(uW - uF)}">${nvK(uW - uF, true)}</td></tr>`;
+else h += `<tr class="nv-ok"><td colspan="6"><i class="ti ti-circle-check"></i> Line items reconcile to the Year feed for ${escapeHtml(rng(proj))}.</td></tr>`;
+}
+h += `</tbody></table></div>`;
+}
+if(closed.length){
+const cW = bd ? sumM(bd.w, closed) : 0, cP = bd ? sumM(bd.p, closed) : 0, cF = bd ? sumM(bd.f, closed) : 0;
+const planned = sP.closed.rows;
+const fcstByItem = new Map(sF.closed.rows.map(r => [r.it, r.b]));
+h += `<details class="nv-closed"><summary><span><b>Closed · ${escapeHtml(rng(closed))}</b> · actual No Vendor ${fmtKplain(cW)} vs Plan ${fmtKplain(cP)} <span class="${varClass(cW - cP)}">${fmtK(cW - cP)}</span></span><span class="nv-closed-hint">Planned lines</span></summary>`;
+h += `<p class="nv-closed-note">Actuals arrive from the GL as one No Vendor amount, so they have no line detail. Below is what the Plan${fClosed.length ? ` and the Forecast (${escapeHtml(rng(fClosed))})` : ''} expected for these months.</p>`;
+if(planned.length || fcstByItem.size){
+const its = Array.from(new Set(planned.map(r => r.it).concat(Array.from(fcstByItem.keys()))));
+h += `<div class="tbl-wrap"><table class="nv-t"><thead><tr><th>Line item</th><th>Plan ${escapeHtml(rng(closed))}</th>${fClosed.length ? `<th>Forecast ${escapeHtml(rng(fClosed))}</th>` : ''}</tr></thead><tbody>`;
+its.forEach(it => {
+const pr = planned.find(r => r.it === it);
+h += `<tr><td><div class="nv-item">${escapeHtml(it.d)}</div></td><td>${nvK(pr ? pr.b : 0)}</td>${fClosed.length ? `<td>${nvK(fcstByItem.get(it) || 0)}</td>` : ''}</tr>`;
+});
+h += `<tr class="nv-board"><td>Actual No Vendor (Year feed)</td><td>${nvK(cW)}</td>${fClosed.length ? `<td>${nvK(sumM(bd ? bd.w : [], fClosed))}</td>` : ''}</tr>`;
+h += `</tbody></table></div>`;
+} else h += `<p class="nv-closed-note">No planned line items for these months.</p>`;
+h += `</details>`;
+}
+if(vItems.length){
+h += `<div class="nv-vend"><i class="ti ti-building-store"></i><span>Also in the feed with a named vendor (shown in the vendor rows, not part of No Vendor): ${vItems.map(it => `<b>${escapeHtml(it.v)}</b> · ${escapeHtml(it.d)}`).join('; ')}</span></div>`;
+}
+h += `<div class="nv-comment"><textarea class="vedit" rows="2" data-persist="comment:nv-${escapeHtml(g.code)}" placeholder="Add context for the No Vendor lines in this account..."></textarea></div>`;
+h += `</div>`;
+});
+if(noDetail.length){
+h += `<div class="sublbl">No Vendor amounts without line detail</div><div class="tbl-wrap"><table class="nv-t"><thead><tr><th>GL account</th><th>FY Working</th><th>FY Plan</th><th>Var vs Plan</th></tr></thead><tbody>`;
+noDetail.forEach(g => {
+const w = sumM(g.board.w, all), p = sumM(g.board.p, all);
+h += `<tr><td><div class="nv-item">${escapeHtml(g.label)}</div><small>${escapeHtml(g.cat || '')}</small></td><td>${fmtKplain(w)}</td><td>${fmtKplain(p)}</td><td class="${varClass(w - p)}">${fmtK(w - p)}</td></tr>`;
+});
+h += `</tbody></table></div>`;
+}
+return h + `</section>`;
 }
 function renderNoActivity(id, icon, title, tag){
 return `<section class="sec" id="${id}"><div class="sec-hdr"><div class="sec-hdr-left"><span class="sec-ic"><i class="ti ${icon}"></i></span><span class="sec-title">${escapeHtml(title)}</span></div><span class="sec-tag">${escapeHtml(tag)}</span></div><div class="comment-block" style="text-align:center;padding:30px 16px;color:#64748b;font-size:14px;font-weight:600"><i class="ti ti-info-circle" style="font-size:20px;display:block;margin-bottom:8px;color:#94a3b8"></i>No activity registered for this period.</div></section>`;
@@ -913,10 +1302,9 @@ document.getElementById('add-act').addEventListener('click', addAction);
 document.querySelectorAll('[data-act-cb]').forEach(cb => cb.addEventListener('change', saveState));
 document.querySelectorAll('[data-persist]').forEach(el => el.addEventListener('input', () => { autoResize(el); saveState(); }));
 if(!dom.root.dataset.drillBound){
-dom.root.addEventListener('click', e => {
-const cell = e.target.closest('[data-drill="1"]');
-if(cell) openDrill(cell);
-});
+// One drill-down implementation for the live board and the exported HTML.
+// The live board reads the current model on every click.
+initDrilldown(dom.root, () => buildDrillData());
 dom.root.dataset.drillBound = '1';
 }
 updateActionCounter();
@@ -1157,7 +1545,7 @@ document.querySelectorAll('aside nav ul li[data-nav]').forEach(function(li){
 li.addEventListener('click', function(){ navTo(li.dataset.nav, li); });
 });
 function scrollSpy(){
-var sections = ['sec-overview','sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst','sec-te','sec-hc','sec-actions'];
+var sections = ['sec-overview','sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst','sec-nv','sec-te','sec-hc','sec-actions'];
 var navItems = document.querySelectorAll('aside nav ul li[data-nav]');
 var scrollY = window.scrollY + 80;
 var current = 0;
@@ -1253,7 +1641,7 @@ function addAction(){var list=document.getElementById('actList');if(!list)return
 function downloadHtml(){try{syncEditableValues(document);var clone=document.documentElement.cloneNode(true);clone.querySelectorAll('#toast').forEach(function(el){el.remove();});var html='<!DOCTYPE html>\\n'+clone.outerHTML;var blob=new Blob([html],{type:'text/html'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=FILE_BASE+'.html';a.click();URL.revokeObjectURL(a.href);toast('HTML downloaded');}catch(error){console.error(error);toast('Could not export HTML');}}
 function downloadPdf(){if(typeof html2canvas==='undefined'||!window.jspdf){toast('PDF libraries did not load');return;}saveState(false);var target=document.querySelector('.main-workspace');if(!target){toast('Could not find dashboard content');return;}var hiddenEls=Array.prototype.slice.call(target.querySelectorAll('.hidden, .del-btn, .del-block, .add-act, .mini-btn, .ghost-btn, .topbar-actions, #back-nav, #home-nav'));var restore=hiddenEls.map(function(el){return [el,el.style.display];});var aside=document.querySelector('aside');var asideDisplay=aside?aside.style.display:null;var prevML=target.style.marginLeft,prevW=target.style.width;toast('Building PDF...');hiddenEls.forEach(function(el){el.style.display='none';});if(aside)aside.style.display='none';target.style.marginLeft='0';target.style.width='100%';setTimeout(function(){html2canvas(target,{scale:2,useCORS:true,backgroundColor:'#f8fafc'}).then(function(canvas){var jsPDF=window.jspdf.jsPDF;var pdf=new jsPDF('p','pt','a4');var pageWidth=pdf.internal.pageSize.getWidth();var pageHeight=pdf.internal.pageSize.getHeight();var ratio=canvas.width/pageWidth;var pageHeightPx=Math.max(1,Math.floor(pageHeight*ratio));var rendered=0,first=true;while(rendered<canvas.height){var sh=Math.min(pageHeightPx,canvas.height-rendered);var sc=document.createElement('canvas');sc.width=canvas.width;sc.height=sh;sc.getContext('2d').drawImage(canvas,0,rendered,canvas.width,sh,0,0,canvas.width,sh);var img=sc.toDataURL('image/jpeg',0.92);if(!first)pdf.addPage();pdf.addImage(img,'JPEG',0,0,pageWidth,sh/ratio);rendered+=sh;first=false;}pdf.save(FILE_BASE+'.pdf');toast('PDF downloaded');}).catch(function(error){console.error(error);toast('Could not export PDF');}).then(function(){restore.forEach(function(pair){pair[0].style.display=pair[1];});if(aside)aside.style.display=asideDisplay;target.style.marginLeft=prevML;target.style.width=prevW;});},60);}
 function navTo(sectionId,el){var target=document.getElementById(sectionId);if(!target)return;var top=target.getBoundingClientRect().top+window.scrollY-20;window.scrollTo({top:top,behavior:'smooth'});document.querySelectorAll('aside nav ul li[data-nav]').forEach(function(li){li.classList.remove('active');});if(el)el.classList.add('active');}
-function scrollSpy(){var sections=['sec-overview','sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst','sec-te','sec-hc','sec-actions'];var navItems=document.querySelectorAll('aside nav ul li[data-nav]');var sy=window.scrollY+80;var current=0;sections.forEach(function(id,i){var el=document.getElementById(id);if(el&&el.offsetTop<=sy)current=i;});navItems.forEach(function(li){li.classList.remove('active');});if(navItems[current])navItems[current].classList.add('active');}
+function scrollSpy(){var sections=['sec-overview','sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst','sec-nv','sec-te','sec-hc','sec-actions'];var navItems=document.querySelectorAll('aside nav ul li[data-nav]');var sy=window.scrollY+80;var current=0;sections.forEach(function(id,i){var el=document.getElementById(id);if(el&&el.offsetTop<=sy)current=i;});navItems.forEach(function(li){li.classList.remove('active');});if(navItems[current])navItems[current].classList.add('active');}
 document.body.addEventListener('click',function(e){var target=e.target;if(!target.closest)return;var delRow=target.closest('[data-del-row]');if(delRow){var id=delRow.dataset.delRow;var row=document.getElementById(id+'-row')||document.getElementById(id);if(row)row.classList.add('hidden');saveState(true);updateActionCounter();return;}var delBlock=target.closest('[data-del-block]');if(delBlock){var wrap=document.getElementById(delBlock.dataset.delBlock+'-wrap');if(wrap)wrap.classList.add('hidden');saveState(true);return;}var addComment=target.closest('[data-add-comment]');if(addComment){addCommentRow(addComment.dataset.addComment);return;}if(target.closest('#add-act')){addAction();return;}if(target.closest('#save-nav')){saveState(true);return;}if(target.closest('#download-nav')){downloadHtml();return;}if(target.closest('#download-pdf-nav')){downloadPdf();return;}var nav=target.closest('aside nav ul li[data-nav]');if(nav){navTo(nav.dataset.nav,nav);return;}});
 document.body.addEventListener('input',function(e){if(e.target&&e.target.matches&&e.target.matches('[data-persist]')){autoResize(e.target);saveState(false);}});
 document.body.addEventListener('change',function(e){if(e.target&&e.target.matches&&e.target.matches('[data-act-cb]')){updateActionCounter();saveState(false);}});
@@ -1909,7 +2297,7 @@ document.querySelectorAll('aside nav ul li[data-nav]').forEach(li => li.classLis
 if(el) el.classList.add('active');
 }
 function scrollSpy(){
-const sections = ['sec-overview','sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst','sec-te','sec-hc','sec-actions'];
+const sections = ['sec-overview','sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst','sec-nv','sec-te','sec-hc','sec-actions'];
 const navItems = document.querySelectorAll('aside nav ul li[data-nav]');
 const scrollY = window.scrollY + 80;
 let current = 0;
@@ -2031,72 +2419,14 @@ if(r.rowType === 'l2' || r.rowType === 'expense'){ pending = []; }
 }
 return map;
 }
-function collectVendorRows(allRows, l2RowIndex){
-const idx = allRows.findIndex(r => r.index === l2RowIndex);
-const out = [];
-for(let i = idx - 1; i >= 0; i--){
-const row = allRows[i];
-if(row.rowType === 'l2' || row.rowType === 'expense') break;
-if(row.rowType === 'vendor' || row.rowType === 'novendor') out.push(row);
-}
-return out;
-}
-function vendorPeriodValues(row, period, benchmarkKey){
-if(period === 'q') return { working: row.total.w, benchmark: row.total[benchmarkKey] };
-const m = row.months[period];
-return { working: m.w, benchmark: m[benchmarkKey] };
-}
-function computeQuarterVendorBreakdown(l2RowIndex, period, benchmarkKey){
-const allRows = (state.model && state.model.quarter && state.model.quarter.allRows) || [];
-const glMap = buildGlMap(allRows);
-const target = allRows.find(r => r.index === l2RowIndex);
-let vendorRows;
-if(target && target.rowType === 'expense'){
-vendorRows = allRows.filter(r => r.rowType === 'vendor' || r.rowType === 'novendor');
-} else {
-vendorRows = collectVendorRows(allRows, l2RowIndex);
-}
-return vendorRows.map(row => {
-const vals = vendorPeriodValues(row, period, benchmarkKey);
-return { name: cleanLabel(row.label), gl: glMap[row.index] || '', working: vals.working, benchmark: vals.benchmark, variance: vals.working - vals.benchmark };
-}).sort((a,b) => Math.abs(b.variance) - Math.abs(a.variance));
-}
-function collectVendorRowsFlex(allRows, l2RowIndex){
-const idx = allRows.findIndex(r => r.index === l2RowIndex);
-const vend = [], gl = [];
-for(let i = idx - 1; i >= 0; i--){
-const row = allRows[i];
-if(row.rowType === 'l2' || row.rowType === 'expense') break;
-if(row.rowType === 'vendor' || row.rowType === 'novendor') vend.push(row);
-else if(row.rowType === 'gl') gl.push(row);
-}
-return vend.length ? vend : gl;
-}
-function yearVendorPeriodValues(row, period, benchmarkKey){
-if(period === 'fy') return { working: row.total.w, benchmark: row.total[benchmarkKey] };
-const q = row.quarters[period];
-return { working: q.w, benchmark: q[benchmarkKey] };
-}
-function computeYearVendorBreakdown(l2RowIndex, period, benchmarkKey){
-const allRows = (state.model && state.model.year && state.model.year.allRows) || [];
-const glMap = buildGlMap(allRows);
-const target = allRows.find(r => r.index === l2RowIndex);
-let vendorRows;
-if(target && target.rowType === 'expense'){
-vendorRows = allRows.filter(r => r.rowType === 'vendor' || r.rowType === 'novendor');
-if(!vendorRows.length) vendorRows = allRows.filter(r => r.rowType === 'gl');
-} else {
-vendorRows = collectVendorRowsFlex(allRows, l2RowIndex);
-}
-return vendorRows.map(row => {
-const vals = yearVendorPeriodValues(row, period, benchmarkKey);
-return { name: cleanLabel(row.label), gl: glMap[row.index] || '', working: vals.working, benchmark: vals.benchmark, variance: vals.working - vals.benchmark };
-}).sort((a,b) => Math.abs(b.variance) - Math.abs(a.variance));
-}
 // Self-contained drill-down used by the exported HTML (app.js is stripped on export,
 // so this function carries its own helpers + reads vendor data from an embedded object).
+// data may be an object (export) or a function returning it (live board, read on each click).
+// nvMiniHtml (No Vendor line items) is resolved from the enclosing scope when present.
 function initDrilldown(root, data){
-data = data || { quarter: [], year: [] };
+var getData = typeof data === 'function' ? data : function(){ return data; };
+data = getData() || { quarter: [], year: [] };
+function nvCode(label){ var m = String(label || '').match(/^\s*(\d{5,})/); return m ? m[1] : ''; }
 function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function fmtK(n){ if(!isFinite(n)||n===0) return '—'; var r=Math.round(n/1000); if(r===0) return '$0K'; var a=Math.abs(r).toLocaleString('en-US'); return r>0?('+$'+a+'K'):('-$'+a+'K'); }
 function fmtKplain(n){ if(!isFinite(n)||n===0) return '—'; var r=Math.round(n/1000); if(r===0) return '$0K'; var a=Math.abs(r).toLocaleString('en-US'); return r<0?('($'+a+'K)'):('$'+a+'K'); }
@@ -2113,12 +2443,12 @@ function yVals(row, period, bk){ if(period==='fy') return {working:row.total.w, 
 function computeQ(rowIndex, period, bk){
 var rows=data.quarter||[]; var gm=glmap(rows); var t=rows.find(function(r){return r.index===rowIndex;}); var vr;
 if(t&&t.rowType==='expense') vr=rows.filter(function(r){return r.rowType==='vendor'||r.rowType==='novendor';}); else vr=collect(rows,rowIndex,false);
-return vr.map(function(row){ var val=qVals(row,period,bk); return {name:cleanLabel(row.label), gl:gm[row.index]||'', working:val.working, benchmark:val.benchmark, variance:val.working-val.benchmark}; }).sort(function(a,b){return Math.abs(b.variance)-Math.abs(a.variance);});
+return vr.map(function(row){ var val=qVals(row,period,bk); return {name:cleanLabel(row.label), gl:gm[row.index]||'', nv:row.rowType==='novendor'?nvCode(gm[row.index]):'', working:val.working, benchmark:val.benchmark, variance:val.working-val.benchmark}; }).sort(function(a,b){return Math.abs(b.variance)-Math.abs(a.variance);});
 }
 function computeY(rowIndex, period, bk){
 var rows=data.year||[]; var gm=glmap(rows); var t=rows.find(function(r){return r.index===rowIndex;}); var vr;
 if(t&&t.rowType==='expense'){ vr=rows.filter(function(r){return r.rowType==='vendor'||r.rowType==='novendor';}); if(!vr.length) vr=rows.filter(function(r){return r.rowType==='gl';}); } else vr=collect(rows,rowIndex,true);
-return vr.map(function(row){ var val=yVals(row,period,bk); return {name:cleanLabel(row.label), gl:gm[row.index]||'', working:val.working, benchmark:val.benchmark, variance:val.working-val.benchmark}; }).sort(function(a,b){return Math.abs(b.variance)-Math.abs(a.variance);});
+return vr.map(function(row){ var val=yVals(row,period,bk); return {name:cleanLabel(row.label), gl:gm[row.index]||'', nv:row.rowType==='novendor'?nvCode(gm[row.index]):'', working:val.working, benchmark:val.benchmark, variance:val.working-val.benchmark}; }).sort(function(a,b){return Math.abs(b.variance)-Math.abs(a.variance);});
 }
 var ctx=null;
 function ensure(){
@@ -2132,10 +2462,11 @@ return o;
 }
 function close(){ var o=document.getElementById('drill-overlay'); var p=document.getElementById('drill-panel'); if(p)p.classList.remove('show'); if(o)o.classList.remove('show'); }
 function open(cell){
-var rowIndex=Number(cell.dataset.rowIndex), scope=cell.dataset.scope||'q', bk=cell.dataset.benchmark, bl=bk==='p'?'Plan':'Forecast', vendors, threshold;
-if(scope==='y'){ var py=cell.dataset.period==='fy'?'fy':Number(cell.dataset.period); vendors=computeY(rowIndex,py,bk); threshold=75; }
-else { var pq=cell.dataset.period==='q'?'q':Number(cell.dataset.period); vendors=computeQ(rowIndex,pq,bk); threshold=25; }
-render({title:cell.dataset.label, periodLabel:cell.dataset.periodLabel, benchmarkLabel:bl, vendors:vendors, threshold:threshold});
+data = getData() || { quarter: [], year: [] };
+var rowIndex=Number(cell.dataset.rowIndex), scope=cell.dataset.scope||'q', bk=cell.dataset.benchmark, bl=bk==='p'?'Plan':'Forecast', vendors, threshold, months;
+if(scope==='y'){ var py=cell.dataset.period==='fy'?'fy':Number(cell.dataset.period); vendors=computeY(rowIndex,py,bk); threshold=75; months = py==='fy' ? [0,1,2,3,4,5,6,7,8,9,10,11] : [py*3, py*3+1, py*3+2]; }
+else { var pq=cell.dataset.period==='q'?'q':Number(cell.dataset.period); vendors=computeQ(rowIndex,pq,bk); threshold=25; var qi=data.qIdx||0; months = pq==='q' ? [qi*3, qi*3+1, qi*3+2] : [qi*3+pq]; }
+render({title:cell.dataset.label, periodLabel:cell.dataset.periodLabel, benchmarkLabel:bl, vendors:vendors, threshold:threshold, months:months, bk:bk});
 }
 function render(c){
 ctx=Object.assign({mode:'materiality', threshold:25, search:''}, c);
@@ -2143,14 +2474,14 @@ var overlay=ensure(), panel=document.getElementById('drill-panel');
 panel.innerHTML=''
 +'<div class="drill-hdr"><div><h3>'+esc(c.title)+'</h3><div class="drill-sub">'+esc(c.periodLabel)+' · Working vs '+esc(c.benchmarkLabel)+'</div></div><button class="drill-close" id="drill-close">&times;</button></div>'
 +'<div class="drill-controls"><div class="drill-seg"><button class="drill-seg-btn" data-mode="materiality">By materiality</button><button class="drill-seg-btn" data-mode="activity" title="With Activity (excluding zero)">With activity</button><button class="drill-seg-btn" data-mode="all">Show all</button></div>'
-+'<div class="drill-thr" id="drill-thr-wrap"><span>± $</span><input type="number" id="drill-thr" min="0" step="5" value="'+c.threshold+'" /><span>K</span></div></div>'
++'<div class="drill-thr" id="drill-thr-wrap"><span>± $</span><input type="number" id="drill-thr" min="0" step="5" value="'+c.threshold+'" /><span>K</span></div></div>'
 +'<div class="drill-search" id="drill-search-wrap"><i class="ti ti-search"></i><input type="text" id="drill-search" placeholder="Search vendor by id or name..." /></div>'
 +'<div class="drill-body" id="drill-body"></div>';
 panel.querySelector('#drill-close').addEventListener('click', close);
 panel.querySelectorAll('.drill-seg-btn').forEach(function(btn){ btn.addEventListener('click', function(){ ctx.mode=btn.dataset.mode; body(); }); });
 var thr=panel.querySelector('#drill-thr'); if(thr) thr.addEventListener('input', function(){ var val=parseFloat(thr.value); ctx.threshold=isFinite(val)?val:0; if(ctx.mode==='materiality') body(); });
 var s=panel.querySelector('#drill-search'); if(s) s.addEventListener('input', function(){ ctx.search=s.value; if(ctx.mode==='all') body(); });
-var be=panel.querySelector('#drill-body'); if(be) be.addEventListener('click', function(e){ var b=e.target.closest('.drill-gl-btn'); if(!b) return; var row=b.closest('.drill-bar-row'); if(!row) return; var open=row.classList.toggle('gl-open'); var ic=b.querySelector('i'); if(ic) ic.className=open?'ti ti-eye-off':'ti ti-eye'; });
+var be=panel.querySelector('#drill-body'); if(be) be.addEventListener('click', function(e){ var nb=e.target.closest('.drill-nv-btn'); if(nb){ var nr=nb.closest('.drill-bar-row'); if(nr) nr.classList.toggle('nv-open'); return; } var b=e.target.closest('.drill-gl-btn'); if(!b) return; var row=b.closest('.drill-bar-row'); if(!row) return; var open=row.classList.toggle('gl-open'); var ic=b.querySelector('i'); if(ic) ic.className=open?'ti ti-eye-off':'ti ti-eye'; });
 body(); overlay.classList.add('show'); requestAnimationFrame(function(){ panel.classList.add('show'); });
 }
 function body(){
@@ -2169,7 +2500,8 @@ var maxVal=Math.max.apply(null,[1].concat(shown.map(function(v){return Math.max(
 function bar(v){
 var wPct=Math.min(100,Math.abs(v.working)/maxVal*100), bPct=Math.min(100,Math.abs(v.benchmark)/maxVal*100), over=v.variance>0;
 var vu=v.benchmark?((v.variance>0?'+':'')+Math.round(v.variance/v.benchmark*100)+'%'):(v.working?'not in plan':'—');
-return '<div class="drill-bar-row"><div class="drill-bar-top"><span class="drill-bar-left"><span class="drill-bar-name">'+esc(v.name)+'</span>'+(v.gl?'<button class="drill-gl-btn" type="button" title="Show GL account"><i class="ti ti-eye"></i></button>':'')+'</span><span class="drill-bar-fig">'+fmtKplain(v.working)+' / '+fmtKplain(v.benchmark)+'</span></div><div class="drill-track"><div class="drill-fill '+(over?'unfav':'fav')+'" style="width:'+wPct+'%"></div>'+(v.benchmark?'<div class="drill-plan-marker" style="left:'+bPct+'%"></div>':'')+'</div><div class="drill-util '+(over?'var-unfav':'var-fav')+'">'+esc(vu)+' vs '+esc(ctx.benchmarkLabel.toLowerCase())+' · '+fmtK(v.variance)+'</div>'+(v.gl?'<div class="drill-gl-line"><i class="ti ti-receipt-2"></i>GL account · '+esc(v.gl)+'</div>':'')+'</div>';
+var nvh=(v.nv && data.nv && typeof nvMiniHtml==='function') ? nvMiniHtml(data.nv, v.nv, ctx.months||[], ctx.bk||'p') : '';
+return '<div class="drill-bar-row"><div class="drill-bar-top"><span class="drill-bar-left"><span class="drill-bar-name">'+esc(v.name)+'</span>'+(v.gl?'<button class="drill-gl-btn" type="button" title="Show GL account"><i class="ti ti-eye"></i></button>':'')+(nvh?'<button class="drill-nv-btn" type="button" title="Show No Vendor line items"><i class="ti ti-list-details"></i></button>':'')+'</span><span class="drill-bar-fig">'+fmtKplain(v.working)+' / '+fmtKplain(v.benchmark)+'</span></div><div class="drill-track"><div class="drill-fill '+(over?'unfav':'fav')+'" style="width:'+wPct+'%"></div>'+(v.benchmark?'<div class="drill-plan-marker" style="left:'+bPct+'%"></div>':'')+'</div><div class="drill-util '+(over?'var-unfav':'var-fav')+'">'+esc(vu)+' vs '+esc(ctx.benchmarkLabel.toLowerCase())+' · '+fmtK(v.variance)+'</div>'+(v.gl?'<div class="drill-gl-line"><i class="ti ti-receipt-2"></i>GL account · '+esc(v.gl)+'</div>':'')+(nvh?'<div class="drill-nv">'+nvh+'</div>':'')+'</div>';
 }
 var unfav=shown.filter(function(v){return v.variance>0;}).sort(function(a,b){return b.variance-a.variance;});
 var fav=shown.filter(function(v){return v.variance<0;}).sort(function(a,b){return a.variance-b.variance;});
@@ -2199,13 +2531,13 @@ else o.quarters = (r.quarters||[]).map(function(x){ return { w:x.w, p:x.p, f:x.f
 return o;
 });
 }
-return { quarter: slim(m.quarter && m.quarter.allRows, 'q'), year: slim(m.year && m.year.allRows, 'y') };
+return { quarter: slim(m.quarter && m.quarter.allRows, 'q'), year: slim(m.year && m.year.allRows, 'y'), qIdx: Math.max(0, quarterNum(m.meta && m.meta.currentQuarterLabel)), nv: m.nv || null };
 }
 function appendDrillExportScript(clone){
 try{
 var json = JSON.stringify(buildDrillData()).replace(/</g, '\\u003c');
 var script = document.createElement('script');
-script.textContent = '(' + initDrilldown.toString() + ')(document, ' + json + ');';
+script.textContent = '(function(){var nvSlice=(' + nvSlice.toString() + ');var nvMiniHtml=(' + nvMiniHtml.toString() + ');(' + initDrilldown.toString() + ')(document, ' + json + ');})();';
 var body = clone.querySelector('body');
 if(body) body.appendChild(script);
 }catch(e){ console.warn('Could not embed drill-down into export.', e); }
@@ -2238,7 +2570,8 @@ total: { vals: m.te.totalRow.values.map(r2), g: r2(m.te.totalRow.grandTotal) }
 return {
 meta: { code: m.meta.dashboardCode, fy: m.meta.fyToken, month: m.meta.monthToken, quarter: m.meta.currentQuarterLabel,
 planLabel: `${m.meta.fyToken} Plan`, fcstLabel: m.meta.forecastLabel, monthIdx },
-monthLabels, quarterLabels, rows, hc, te, hasOpex: !!m.opex
+monthLabels, quarterLabels, rows, hc, te, hasOpex: !!m.opex,
+nv: m.nv || null
 };
 }
 function mountAnalystBot(){
@@ -2257,165 +2590,6 @@ script.textContent = '(' + initAnalystBot.toString() + ')(' + json + ');';
 const body = clone.querySelector('body');
 if(body) body.appendChild(script);
 }catch(e){ console.warn('Could not embed the FP&A analyst bot into export.', e); }
-}
-function ensureDrillPanel(){
-let overlay = document.getElementById('drill-overlay');
-if(overlay) return overlay;
-overlay = document.createElement('div');
-overlay.id = 'drill-overlay';
-overlay.className = 'drill-overlay';
-overlay.innerHTML = '<div class="drill-panel" id="drill-panel" role="dialog" aria-modal="true"></div>';
-document.body.appendChild(overlay);
-overlay.addEventListener('click', e => { if(e.target === overlay) closeDrill(); });
-document.addEventListener('keydown', e => { if(e.key === 'Escape') closeDrill(); });
-return overlay;
-}
-function closeDrill(){
-const overlay = document.getElementById('drill-overlay');
-const panel = document.getElementById('drill-panel');
-if(panel) panel.classList.remove('show');
-if(overlay) overlay.classList.remove('show');
-}
-function openDrill(cell){
-const rowIndex = Number(cell.dataset.rowIndex);
-const scope = cell.dataset.scope || 'q';
-const benchmarkKey = cell.dataset.benchmark;
-const benchmarkLabel = benchmarkKey === 'p' ? 'Plan' : 'Forecast';
-let vendors, threshold;
-if(scope === 'y'){
-const period = cell.dataset.period === 'fy' ? 'fy' : Number(cell.dataset.period);
-vendors = computeYearVendorBreakdown(rowIndex, period, benchmarkKey);
-threshold = 75;
-} else {
-const period = cell.dataset.period === 'q' ? 'q' : Number(cell.dataset.period);
-vendors = computeQuarterVendorBreakdown(rowIndex, period, benchmarkKey);
-threshold = 25;
-}
-renderDrillPanel({ title: cell.dataset.label, periodLabel: cell.dataset.periodLabel, benchmarkLabel, vendors, threshold });
-}
-let drillCtx = null;
-function renderDrillPanel(ctx){
-drillCtx = Object.assign({ mode:'materiality', threshold:25, search:'' }, ctx);
-const overlay = ensureDrillPanel();
-const panel = document.getElementById('drill-panel');
-panel.innerHTML = `
-<div class="drill-hdr">
-<div>
-<h3>${escapeHtml(ctx.title)}</h3>
-<div class="drill-sub">${escapeHtml(ctx.periodLabel)} · Working vs ${escapeHtml(ctx.benchmarkLabel)}</div>
-</div>
-<button class="drill-close" id="drill-close">&times;</button>
-</div>
-<div class="drill-controls">
-<div class="drill-seg">
-<button class="drill-seg-btn" data-mode="materiality">By materiality</button>
-<button class="drill-seg-btn" data-mode="activity" title="With Activity (excluding zero)">With activity</button>
-<button class="drill-seg-btn" data-mode="all">Show all</button>
-</div>
-<div class="drill-thr" id="drill-thr-wrap">
-<span>±&nbsp;$</span><input type="number" id="drill-thr" min="0" step="5" value="${ctx.threshold}" /><span>K</span>
-</div>
-</div>
-<div class="drill-search" id="drill-search-wrap">
-<i class="ti ti-search"></i><input type="text" id="drill-search" placeholder="Search vendor by id or name..." value="${escapeHtml(ctx.search||'')}" />
-</div>
-<div class="drill-body" id="drill-body"></div>`;
-panel.querySelector('#drill-close').addEventListener('click', closeDrill);
-panel.querySelectorAll('.drill-seg-btn').forEach(btn => {
-btn.addEventListener('click', () => { drillCtx.mode = btn.dataset.mode; renderDrillBody(); });
-});
-const thr = panel.querySelector('#drill-thr');
-if(thr) thr.addEventListener('input', () => {
-const val = parseFloat(thr.value);
-drillCtx.threshold = Number.isFinite(val) ? val : 0;
-if(drillCtx.mode === 'materiality') renderDrillBody();
-});
-const search = panel.querySelector('#drill-search');
-if(search) search.addEventListener('input', () => { drillCtx.search = search.value; if(drillCtx.mode === 'all') renderDrillBody(); });
-const bodyEl = panel.querySelector('#drill-body');
-if(bodyEl) bodyEl.addEventListener('click', e => {
-const btn = e.target.closest('.drill-gl-btn');
-if(!btn) return;
-const row = btn.closest('.drill-bar-row');
-if(!row) return;
-const open = row.classList.toggle('gl-open');
-const ic = btn.querySelector('i');
-if(ic) ic.className = open ? 'ti ti-eye-off' : 'ti ti-eye';
-});
-renderDrillBody();
-overlay.classList.add('show');
-requestAnimationFrame(() => panel.classList.add('show'));
-}
-function renderDrillBody(){
-const panel = document.getElementById('drill-panel');
-if(!panel || !drillCtx) return;
-const body = panel.querySelector('#drill-body');
-panel.querySelectorAll('.drill-seg-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === drillCtx.mode));
-const thrWrap = panel.querySelector('#drill-thr-wrap');
-if(thrWrap) thrWrap.style.display = drillCtx.mode === 'materiality' ? 'flex' : 'none';
-const searchWrap = panel.querySelector('#drill-search-wrap');
-if(searchWrap) searchWrap.style.display = drillCtx.mode === 'all' ? 'flex' : 'none';
-const all = drillCtx.vendors;
-const totW = all.reduce((s,v)=>s+v.working,0);
-const totB = all.reduce((s,v)=>s+v.benchmark,0);
-const totVar = totW - totB;
-const util = totB ? Math.round(totW/totB*100) : null;
-const thrAbs = (drillCtx.threshold || 0) * 1000;
-let shown;
-if(drillCtx.mode === 'materiality'){
-shown = all.filter(v => Math.abs(v.variance) >= thrAbs);
-} else if(drillCtx.mode === 'activity'){
-shown = all.filter(v => v.working !== 0 || v.benchmark !== 0);
-} else {
-shown = all;
-const q = (drillCtx.search || '').trim().toLowerCase();
-if(q) shown = shown.filter(v => v.name.toLowerCase().includes(q));
-}
-const maxVal = Math.max(1, ...shown.map(v => Math.max(Math.abs(v.working), Math.abs(v.benchmark))));
-const renderBar = v => {
-const wPct = Math.min(100, Math.abs(v.working)/maxVal*100);
-const bPct = Math.min(100, Math.abs(v.benchmark)/maxVal*100);
-const over = v.variance > 0;
-const vpct = v.benchmark ? ((v.variance>0?'+':'') + Math.round(v.variance/v.benchmark*100) + '%') : (v.working ? 'not in plan' : '—');
-return `<div class="drill-bar-row">
-<div class="drill-bar-top">
-<span class="drill-bar-left"><span class="drill-bar-name">${escapeHtml(v.name)}</span>${v.gl ? '<button class="drill-gl-btn" type="button" title="Show GL account"><i class="ti ti-eye"></i></button>' : ''}</span>
-<span class="drill-bar-fig">${fmtKplain(v.working)} / ${fmtKplain(v.benchmark)}</span>
-</div>
-<div class="drill-track">
-<div class="drill-fill ${over?'unfav':'fav'}" style="width:${wPct}%"></div>
-${v.benchmark ? `<div class="drill-plan-marker" style="left:${bPct}%"></div>` : ''}
-</div>
-<div class="drill-util ${over?'var-unfav':'var-fav'}">${escapeHtml(vpct)} vs ${escapeHtml(drillCtx.benchmarkLabel.toLowerCase())} · ${fmtK(v.variance)}</div>
-${v.gl ? `<div class="drill-gl-line"><i class="ti ti-receipt-2"></i>GL account · ${escapeHtml(v.gl)}</div>` : ''}
-</div>`;
-};
-const unfav = shown.filter(v => v.variance > 0).sort((a,b)=>b.variance - a.variance);
-const fav = shown.filter(v => v.variance < 0).sort((a,b)=>a.variance - b.variance);
-const neutral = shown.filter(v => v.variance === 0);
-const groupHdr = (cls, main, note, count) => `<div class="drill-group-hdr ${cls}"><span class="ghl"><span class="gmain">${main}</span><span class="gnote">(${note})</span></span><span class="gcount">${count}</span></div>`;
-let bars = '';
-if(fav.length) bars += groupHdr('fav', 'Favorable', 'Savings', fav.length) + fav.map(renderBar).join('');
-if(unfav.length) bars += groupHdr('unfav', 'Unfavorable', 'Overspend', unfav.length) + unfav.map(renderBar).join('');
-if(neutral.length) bars += groupHdr('neu', 'No Variance', 'In line with Plan', neutral.length) + neutral.map(renderBar).join('');
-let countTxt;
-if(drillCtx.mode === 'materiality'){
-countTxt = `Showing ${shown.length} of ${all.length} vendors · materiality ± $${drillCtx.threshold}K`;
-} else if(drillCtx.mode === 'activity'){
-countTxt = `Showing ${shown.length} of ${all.length} vendors · with activity (excluding zero)`;
-} else {
-const q = (drillCtx.search || '').trim();
-countTxt = q ? `Showing ${shown.length} of ${all.length} vendors · search \"${q}\"` : `Showing all ${all.length} vendors`;
-}
-body.innerHTML = `
-<div class="drill-summary">
-<div class="ds"><div class="k">Working</div><div class="val">${fmtKplain(totW)}</div></div>
-<div class="ds"><div class="k">${escapeHtml(drillCtx.benchmarkLabel)}</div><div class="val">${fmtKplain(totB)}</div></div>
-<div class="ds"><div class="k">Variance</div><div class="val ${totVar<0?'kpi-fav':totVar>0?'kpi-unfav':'kpi-neu'}">${fmtK(totVar)}</div></div>
-<div class="ds"><div class="k">Utilization</div><div class="val">${util===null?'—':util+'%'}</div></div>
-</div>
-<div class="drill-count">${escapeHtml(countTxt)}</div>
-${shown.length ? bars : `<div class="drill-empty">${drillCtx.mode === 'materiality' ? 'No vendors within this materiality range.' : 'No vendors to display.'}</div>`}`;
 }
 function quarterNum(label){ const m = String(label||'').match(/Q\s*([1-4])/i); return m ? parseInt(m[1],10)-1 : -1; }
 function cleanLabel(label){ return String(label||'').replace(/^Total\s+/,''); }
