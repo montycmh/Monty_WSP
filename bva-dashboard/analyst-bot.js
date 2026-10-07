@@ -193,8 +193,55 @@ function initAnalystBot(DATA){
     if(E._full.length >= 4 && (' ' + qn + ' ').indexOf(' ' + E._full + ' ') >= 0) s += 3;
     return s;
   }
-  var ALL = [].concat(CATS, GLS, VLIST.filter(function(v){ return !v.nov; }), ELIST);
-  var TYPE_BONUS = { cat:0.3, gl:0.2, vendor:0.1, employee:0.05 };
+  /* ---------------- index: No Vendor line items (optional NO VENDOR feed) ----------------
+     DATA.nv.gls[] = { code, label, cat, board:{w,p,f}[12] (No Vendor rows of the Year feed) | null,
+                       items:[{ d, v, nv, w[12], p[12], f[12], dt }] }
+     Working line items exist only after the review month (closed months are actuals without
+     line detail); Forecast line items start at DATA.nv.fStart.                                 */
+  var NV = (DATA.nv && DATA.nv.gls && DATA.nv.gls.length) ? DATA.nv : null;
+  var NVFS = NV && NV.fStart !== null && NV.fStart !== undefined ? NV.fStart : 99;
+  var NVL = [];
+  function nvG(code){ if(!NV) return null; for(var i = 0; i < NV.gls.length; i++){ if(NV.gls[i].code === code) return NV.gls[i]; } return null; }
+  function nvSum(a, ms){ var s = 0; ms.forEach(function(m){ s += (a && a[m]) || 0; }); return s; }
+  if(NV) NV.gls.forEach(function(g){
+    g.items.forEach(function(it, i){ NVL.push({ type:'nvline', key:'nl:' + g.code + ':' + i, label:it.d, name:it.d, code:'', it:it, g:g }); });
+  });
+  // Same split as the board: projected months get line-level Working vs benchmark,
+  // closed months only have the actual No Vendor total next to the planned lines.
+  function nvSplit(g, months, bk){
+    var proj = months.filter(function(m){ return m > RM; }), closed = months.filter(function(m){ return m <= RM; });
+    function det(ms){ return bk === 'f' ? ms.filter(function(m){ return m >= NVFS; }) : ms; }
+    var bd = g.board || { w:[], p:[], f:[] };
+    var o = { proj:proj, closed:closed, rows:[], plan:[], detW:0, detB:0,
+      boardW:nvSum(bd.w, proj), boardB:nvSum(bd[bk], proj), cW:nvSum(bd.w, closed), cB:nvSum(bd[bk], closed) };
+    g.items.forEach(function(it){
+      if(!it.nv) return;
+      var w = nvSum(it.w, proj), b = nvSum(it[bk], det(proj));
+      if(Math.abs(w) >= 0.5 || Math.abs(b) >= 0.5){ o.rows.push({ it:it, w:w, b:b, v:w - b }); o.detW += w; o.detB += b; }
+      var cb = nvSum(it[bk], det(closed));
+      if(Math.abs(cb) >= 0.5) o.plan.push({ it:it, b:cb });
+    });
+    o.rows.sort(function(a, b){ return Math.abs(b.v) - Math.abs(a.v); });
+    o.plan.sort(function(a, b){ return Math.abs(b.b) - Math.abs(a.b); });
+    o.unW = o.boardW - o.detW; o.unB = o.boardB - o.detB;
+    return o;
+  }
+  // Names of the line items that move a GL away from its benchmark in one month (sign > 0: above).
+  function nvNames(code, m, bk, sign){
+    var g = nvG(code); if(!g || m <= RM) return [];
+    return g.items.filter(function(it){ return it.nv; })
+      .map(function(it){ return { d:it.d, x:((it.w && it.w[m]) || 0) - (m >= NVFS || bk !== 'f' ? ((it[bk] && it[bk][m]) || 0) : 0) }; })
+      .filter(function(r){ return sign > 0 ? r.x >= 100 : r.x <= -100; })
+      .sort(function(a, b){ return Math.abs(b.x) - Math.abs(a.x); })
+      .map(function(r){ return r.d; });
+  }
+  function nvNamesList(list, bk, sign){
+    var seen = {}, out = [];
+    list.forEach(function(e){ nvNames(e.gl.code, e.m, bk, sign).forEach(function(n){ if(!seen[n]){ seen[n] = 1; out.push(n); } }); });
+    return out;
+  }
+  var ALL = [].concat(CATS, GLS, VLIST.filter(function(v){ return !v.nov; }), ELIST, NVL);
+  var TYPE_BONUS = { cat:0.3, gl:0.2, vendor:0.1, employee:0.05, nvline:0 };
   function queryTokens(qn){
     return qn.split(' ').filter(function(t){
       if(!t || QSTOPSET[t] || MONTHWORDS.hasOwnProperty(t)) return false;
@@ -224,7 +271,7 @@ function initAnalystBot(DATA){
     if(/\b(employee|empleado|who|quien|person|persona)\b/.test(qn)) return 'employee';
     return null;
   }
-  function typeLabel(E){ return ({ cat:'Category (L2)', gl:'GL account', vendor:'Vendor', employee:'Employee', total:'Total' })[E.type] || ''; }
+  function typeLabel(E){ if(E.type === 'nvline') return E.it.nv ? 'No Vendor line item' : 'Line item · ' + E.it.v; return ({ cat:'Category (L2)', gl:'GL account', vendor:'Vendor', employee:'Employee', total:'Total' })[E.type] || ''; }
 
   /* ---------------- parsing: period, benchmark, direction ---------------- */
   function parsePeriod(qn){
@@ -274,7 +321,7 @@ function initAnalystBot(DATA){
   /* ---------------- board notes (comments typed on the board) ---------------- */
   var SEC = {
     'sec-qplan': QL[RQ] + ' vs Plan', 'sec-qfcst': QL[RQ] + ' vs Forecast',
-    'sec-fyplan': 'Full year vs Plan', 'sec-fyfcst': 'Full year vs Forecast', 'sec-hc': 'Headcount'
+    'sec-fyplan': 'Full year vs Plan', 'sec-fyfcst': 'Full year vs Forecast', 'sec-hc': 'Headcount', 'sec-nv': 'No Vendor detail'
   };
   var AUTO = /Validate timing, scope, and whether the run-rate|Variance appears pooled inside unattributed detail rows|^Open req not filled yet|^TBH line is now flowing|^Working cost is showing without plan budget|^Working is (below|above) plan, likely driven|^No material variance versus plan/;
   function isHidden(el){ return !!(el && el.closest && el.closest('.hidden')); }
@@ -301,6 +348,12 @@ function initAnalystBot(DATA){
         var txt = String(t.value || t.textContent || '').trim();
         if(txt) out.push({ sid:sid, label:'', who:'', text:txt });
       });
+    });
+    d.querySelectorAll('.nv-gl').forEach(function(card){
+      if(isHidden(card)) return;
+      var t = card.querySelector('textarea');
+      var txt = t ? String(t.value || t.textContent || '').trim() : '';
+      if(txt) out.push({ sid:'sec-nv', label:'', who:card.getAttribute('data-gl-label') || '', text:txt });
     });
     d.querySelectorAll('.hcrow').forEach(function(row){
       if(isHidden(row)) return;
@@ -471,7 +524,7 @@ function initAnalystBot(DATA){
     var rows = [];
     if(cl) rows.push([cl + ' actual ' + (o.closed <= 0 ? 'savings' : 'overspend'), 'Real spend vs ' + bn + ' in closed months', o.closed]);
     if(pj){
-      if(o.parked >= 0.5) rows.push(['Savings moved to buffer (' + monthList(o.parkedL) + ')', 'Re-budgeted into future months · not spend', o.parked, 1]);
+      if(o.parked >= 0.5){ var pn = nvNamesList(o.parkedL, bk, 1); rows.push(['Savings moved to buffer (' + monthList(o.parkedL) + ')', 'Re-budgeted into future months · not spend' + (pn.length ? ' · line items: ' + pn.slice(0, 2).join(', ') + (pn.length > 2 ? ', …' : '') : ''), o.parked, 1]); }
       if(o.funding <= -0.5){
         var cov = topNames(o.overL.filter(function(x){ return o.fundL.some(function(f){ return f.m === x.m; }); }), 2);
         rows.push(['Buffer used to cover overspends (' + monthList(o.fundL) + ')', cov ? 'Covers ' + cov + ' (same month)' : 'Released to fund overspends', o.funding, 1]);
@@ -513,6 +566,7 @@ function initAnalystBot(DATA){
         + '<li><b>Exceptions:</b> "What is not in plan?", "Budget with no spend YTD"</li>'
         + '<li><b>Pacing:</b> "Budget utilization", "Monthly trend for Software"</li>'
         + '<li><b>Buffer:</b> "Real vs projected", "Where are the savings parked?", "Software excluding buffer"</li>'
+        + (NV ? '<li><b>No Vendor detail:</b> "No Vendor line items", "No Vendor in Consulting", or the name of a line item</li>' : '')
         + '<li><b>People & T&E:</b> "Headcount", "Open TBH roles", "T&E by employee", "Jorge Herrera"</li>'
         + '<li><b>Board items:</b> "Open actions"</li></ul>'
         + '<p class="fb-dim">Defaults: current quarter (' + esc(QL[RQ]) + ') and ' + esc(PLAN) + ' unless you name a month, quarter, YTD, full year or Forecast.</p>',
@@ -582,7 +636,7 @@ function initAnalystBot(DATA){
     var pk = grp(o.parkedL).sort(function(a, b){ return b.d - a.d; });
     if(pk.length){
       h += '<div class="fb-sub">Savings moved to buffer</div><table class="fb-t"><tbody>';
-      pk.slice(0, 6).forEach(function(e){ h += '<tr><td>' + esc(e.gl.code + ' ' + e.gl.name) + '<small>' + esc(MONTHS[e.m]) + '</small></td><td>' + nspan(e.d) + '</td></tr>'; });
+      pk.slice(0, 6).forEach(function(e){ var nn = nvNames(e.gl.code, e.m, bk, 1); h += '<tr><td>' + esc(e.gl.code + ' ' + e.gl.name) + '<small>' + esc(MONTHS[e.m]) + (nn.length ? ' · ' + esc(nn.slice(0, 2).join(', ')) : '') + '</small></td><td>' + nspan(e.d) + '</td></tr>'; });
       if(pk.length > 6) h += '<tr class="fb-more"><td colspan="2">+ ' + (pk.length - 6) + ' more</td></tr>';
       h += '</tbody></table>';
     }
@@ -591,10 +645,12 @@ function initAnalystBot(DATA){
       h += '<div class="fb-sub">Buffer used to cover overspends</div><table class="fb-t"><tbody>';
       fd.slice(0, 5).forEach(function(e){
         var same = o.overL.filter(function(x){ return x.m === e.m; }).sort(function(a, b){ return b.d - a.d; }).slice(0, 2);
-        h += '<tr><td>' + esc(e.gl.code + ' ' + e.gl.name) + '<small>' + esc(MONTHS[e.m]) + (same.length ? ' · covers ' + same.map(function(x){ return esc(x.x.vendor.name) + ' ' + fv(x.d); }).join(', ') : '') + '</small></td><td>' + nspan(e.d) + '</td></tr>';
+        var fn = nvNames(e.gl.code, e.m, bk, -1);
+        h += '<tr><td>' + esc(e.gl.code + ' ' + e.gl.name) + '<small>' + esc(MONTHS[e.m]) + (fn.length ? ' · ' + esc(fn.slice(0, 2).join(', ')) : '') + (same.length ? ' · covers ' + same.map(function(x){ return esc(x.x.vendor.name) + ' ' + fv(x.d); }).join(', ') : '') + '</small></td><td>' + nspan(e.d) + '</td></tr>';
       });
       h += '</tbody></table>';
     }
+    if(NV) h += '<p class="fb-dim">Line item names come from the No Vendor feed. Ask "No Vendor line items" for the full list.</p>';
     return { html:h, chips:chipsFor([
       P.t === 'fy' ? 'Real vs projected ' + QL[RQ] : 'Real vs projected full year',
       'Real vs projected vs ' + (bk === 'p' ? 'forecast' : 'plan'),
@@ -649,6 +705,8 @@ function initAnalystBot(DATA){
     } else if(E.type === 'gl'){
       var gv = kids(E, P, bk0);
       if(gv.length) h += '<div class="fb-sub">By vendor · ' + esc(pLabel(P)) + '</div>' + kidTable(gv, 6, P, bk0);
+      var ng = nvG(E.code);
+      if(ng) h += nvBlock(ng, P, bk0, false);
     } else if(E.type === 'vendor' && E.pairs.length > 1){
       h += '<div class="fb-sub">By account · ' + esc(pLabel(P)) + '</div>' + kidTable(kids(E, P, bk0), 6, P, bk0);
     }
@@ -895,9 +953,76 @@ function initAnalystBot(DATA){
     return { html:h, chips:chips.concat(['Top 5 unfavorable vendors this quarter', 'Help']).slice(0, 4) };
   }
 
+  /* ---------------- No Vendor line items ---------------- */
+  function rangeLbl(ms){ if(!ms.length) return ''; return ms.length === 1 ? MONTHS[ms[0]] : MONTHS[ms[0]] + ' – ' + MONTHS[ms[ms.length - 1]]; }
+  function nvBlock(g, P, bk, full){
+    var o = nvSplit(g, monthsOf(P), bk), bn = bk === 'f' ? 'FCST' : 'Plan', t = 2500;
+    var h = '<div class="fb-sub">' + (full ? esc(g.label) : 'No Vendor line items · ' + esc(pLabel(P))) + '</div>';
+    if(o.proj.length){
+      if(o.rows.length || Math.abs(o.unW) >= 0.5 || Math.abs(o.unB) >= 0.5){
+        h += '<table class="fb-t"><thead><tr><th>' + esc(rangeLbl(o.proj)) + '</th><th>Working</th><th>' + bn + '</th><th>Var</th></tr></thead><tbody>';
+        o.rows.slice(0, 6).forEach(function(r){
+          var tg = Math.abs(r.b) < 0.5 ? 'not in ' + bn : Math.abs(r.w) < 0.5 ? 'no Working' : '';
+          h += '<tr><td>' + esc(r.it.d) + (tg ? '<small>' + tg + '</small>' : '') + '</td><td>' + fm(r.w) + '</td><td>' + fm(r.b) + '</td><td>' + vspan(r.v, t) + '</td></tr>';
+        });
+        if(o.rows.length > 6) h += '<tr class="fb-more"><td colspan="4">+ ' + (o.rows.length - 6) + ' more</td></tr>';
+        if(g.board && (Math.abs(o.unW) >= 0.5 || Math.abs(o.unB) >= 0.5)) h += '<tr class="fb-bufrow"><td>Not explained by line items</td><td>' + fm(o.unW) + '</td><td>' + fm(o.unB) + '</td><td>' + vspan(o.unW - o.unB, t) + '</td></tr>';
+        h += '</tbody></table>';
+      } else h += '<p class="fb-dim">No projected line items in ' + esc(rangeLbl(o.proj)) + '.</p>';
+    }
+    if(o.closed.length && g.board){
+      h += '<p class="fb-dim">' + esc(rangeLbl(o.closed)) + ' are closed: actual No Vendor ' + fm(o.cW) + ' vs ' + fm(o.cB) + ' ' + bn + ' (' + vspan(o.cW - o.cB, t) + '). Actuals carry no line detail'
+        + (o.plan.length ? '; planned lines: ' + o.plan.slice(0, 3).map(function(r){ return esc(r.it.d) + ' ' + fm(r.b); }).join(', ') + (o.plan.length > 3 ? ', …' : '') : '') + '.</p>';
+    }
+    return h;
+  }
+  function aNV(scope, P, bk){
+    bk = bk === 'both' ? 'p' : (bk || 'p');
+    if(!NV) return { html:'<p>This board was built without the No Vendor feed, so I can\'t break down the "No Vendor" amounts. Upload the optional NO VENDOR feed and regenerate the board.</p>', chips:['Real vs projected full year', 'Executive summary'] };
+    var gl = NV.gls.filter(function(g){ return !scope || (scope.type === 'gl' && g.code === scope.code) || (scope.type === 'cat' && norm(g.cat) === norm(scope.name)); });
+    var withItems = gl.filter(function(g){ return g.items.some(function(it){ return it.nv; }); });
+    var h = '<div class="fb-h">No Vendor line items' + (scope ? ' · ' + esc(scope.name) : '') + ' <small>' + esc(pLabel(P)) + ' vs ' + esc(bName(bk)) + '</small></div>';
+    var ms = monthsOf(P), proj = ms.filter(function(m){ return m > RM; }), tw = 0, tb = 0, uw = 0;
+    withItems.forEach(function(g){ var o = nvSplit(g, ms, bk); tw += o.detW; tb += o.boardW; if(g.board) uw += o.unW; });
+    if(proj.length && withItems.length) h += '<p>In the projected months (' + esc(rangeLbl(proj)) + '), line items explain <b>' + fm(tw) + '</b> of ' + fm(tb) + ' No Vendor Working' + (Math.abs(uw) >= 0.5 ? '; <b>' + fm(uw) + '</b> is not explained by line items.' : ', so it fully reconciles.') + '</p>';
+    else if(!proj.length) h += '<p>All months in ' + esc(pLabel(P)) + ' are closed. No Vendor actuals carry no line detail, so I show the planned lines next to the actual total.</p>';
+    NV.warnings.concat(NV.notes).forEach(function(n){ h += '<p class="fb-dim">' + esc(n) + '</p>'; });
+    withItems.forEach(function(g){ h += nvBlock(g, P, bk, true); });
+    if(!withItems.length) h += '<p>There are no No Vendor line items' + (scope ? ' for ' + esc(scope.name) : '') + ' in the feed.</p>';
+    var nod = gl.filter(function(g){ return !g.items.length && g.board; });
+    if(nod.length) h += '<p class="fb-dim">No Vendor amounts without line detail: ' + nod.slice(0, 4).map(function(g){ return esc(g.label); }).join('; ') + (nod.length > 4 ? '; +' + (nod.length - 4) + ' more' : '') + '.</p>';
+    var first = withItems[0] && withItems[0].items.filter(function(it){ return it.nv; })[0];
+    return { html:h, chips:chipsFor([
+      'No Vendor line items' + (scope ? ' ' + scope.name : '') + ' vs ' + (bk === 'p' ? 'forecast' : 'plan'),
+      'No Vendor line items' + (scope ? ' ' + scope.name : '') + ' ' + (P.t === 'fy' ? QL[RQ] : 'full year'),
+      'Where are the savings parked?',
+      first ? first.d : null
+    ]) };
+  }
+  function aNVLine(E){
+    var it = E.it, g = E.g, all = [0,1,2,3,4,5,6,7,8,9,10,11];
+    var proj = all.filter(function(m){ return m > RM; }), closed = all.filter(function(m){ return m <= RM; });
+    var fproj = proj.filter(function(m){ return m >= NVFS; });
+    var h = '<div class="fb-h">' + esc(it.d) + ' <small>' + esc(typeLabel(E)) + '</small></div>';
+    h += '<p class="fb-dim">' + esc(g.label) + (g.cat ? ' · ' + esc(g.cat) : '') + (it.dt ? ' · contract ' + esc(it.dt) : '') + '</p>';
+    var w = nvSum(it.w, proj), p = nvSum(it.p, proj), f = nvSum(it.f, fproj), pFY = nvSum(it.p, all), pc = nvSum(it.p, closed);
+    if(proj.length){
+      h += '<p>Projected ' + esc(rangeLbl(proj)) + ': Working <b>' + fm(w) + '</b> vs ' + fm(p) + ' ' + esc(PLAN) + ' (' + vspan(w - p, 2500) + ') and ' + fm(f) + ' ' + esc(FCST) + ' (' + vspan(w - f, 2500) + ').'
+        + (Math.abs(p) < 0.5 && Math.abs(w) >= 0.5 ? ' This line is <b>not in the Plan</b>.' : Math.abs(w) < 0.5 && Math.abs(p) >= 0.5 ? ' Working no longer carries this line.' : '') + '</p>';
+    }
+    h += '<p>Full-year ' + esc(PLAN) + ' for this line: ' + fm(pFY) + (closed.length && Math.abs(pc) >= 0.5 ? ', of which ' + fm(pc) + ' falls in the closed months (' + esc(rangeLbl(closed)) + '), where actuals have no line detail.' : '.') + '</p>';
+    if(proj.length){
+      h += '<table class="fb-t fb-tw"><thead><tr><th></th><th>Working</th><th>Plan</th><th>Forecast</th></tr></thead><tbody>';
+      proj.forEach(function(m){ h += '<tr><td>' + esc(MONTHS[m]) + '</td><td>' + fm(it.w[m] || 0) + '</td><td>' + fm(it.p[m] || 0) + '</td><td>' + (m >= NVFS ? fm(it.f[m] || 0) : '—') + '</td></tr>'; });
+      h += '</tbody></table>';
+    }
+    if(!it.nv) h += '<p class="fb-dim">This line is booked with vendor ' + esc(it.v) + ', so it shows in the vendor rows, not in No Vendor.</p>';
+    return { html:h, chips:chipsFor(['No Vendor line items' + (g.cat ? ' ' + g.cat : ''), 'Where are the savings parked?', 'Real vs projected full year']) };
+  }
+
   /* ---------------- router ---------------- */
   var CTX = null;
-  var FOLLOWABLE = { entity:1, top:1, total:1, unplanned:1, unused:1, util:1, trend:1, buffer:1, compare:1 };
+  var FOLLOWABLE = { entity:1, top:1, total:1, unplanned:1, unused:1, util:1, trend:1, buffer:1, compare:1, nv:1 };
   /* ---------------- comparisons ---------------- */
   function multiEntities(qn){
     var chunks = qn.split(/\b(?:vs|versus|against|contra|compared to|compare|comparar|compara|comparado con|frente a|and|y|with|con)\b|,/);
@@ -1052,6 +1177,7 @@ function initAnalystBot(DATA){
     scenario: /\bwhat if\b|\bque pasa\w* si\b|\bsi (recort|cort|reduc|aument|baj|sub)\w*|\bscenarios?\b|\bescenarios?\b|\bsimula\w*|\bimpact of (cutting|reducing|adding|removing)\b|\d+(\.\d+)?\s?%|\b\d+ (percent|por ?ciento)\b/,
     rec: /\b(should (we|i)|recommend\w*|recomiend\w*|recomendac\w*|deberia\w*|debemos|what (can|could) we cut|que (podemos|deberiamos) (recortar|cortar)|advice|aconsej\w*|consejo\w*|suggest\w*|sugier\w*|sugerenc\w*)\b/,
     compare: /\b(compare|comparar|compara|comparison|comparacion|versus|vs|against|contra|side by side|frente a)\b/,
+    nv: /\bno vendor\b|\bsin proveedor\b|\bline items?\b|\bpartidas?\b|\bdetalle de no vendor\b/,
     follow: /^(and|y|what about|how about|same|lo mismo|and in|and for|y en|y para|y vs|and vs|and the|y el|y la|now|ahora)\b/
   };
   function exec(S){
@@ -1081,6 +1207,8 @@ function initAnalystBot(DATA){
       case 'compare': return aCompare(S.list, S.P || { t:'q', i:RQ }, S.bk || 'p');
       case 'outscope': return aOutScope(S.kind, S.E, S.P, S.bk, S.raw || S.qn);
       case 'random': return aRandom(S.qn);
+      case 'nv': return aNV(S.scope, S.P || { t:'fy' }, S.bk);
+      case 'nvline': return aNVLine(S.E);
     }
     return aFallback(S.qn || '');
   }
@@ -1099,6 +1227,9 @@ function initAnalystBot(DATA){
     if(I.menu) return (S.intent = 'menu', S);
     if(I.help) return (S.intent = 'help', S);
     if(I.actions && !best) return (S.intent = 'actions', S);
+    var nvScope = found.filter(function(x){ return x.E.type === 'cat' || x.E.type === 'gl'; })[0];
+    if(NV && I.nv && !I.buffer) return (S.intent = 'nv', S.scope = nvScope ? nvScope.E : null, S);
+    if(NV && SECTION && SECTION.id === 'nv' && best && (best.type === 'cat' || best.type === 'gl') && !isTop && !I.compare) return (S.intent = 'nv', S.scope = best, S);
     var bestNE = best && best.type !== 'employee' ? best : null;
     if(I.opinion) return (S.intent = 'outscope', S.kind = 'opinion', S.E = bestNE || (CTX && CTX.E) || null, S);
     if(I.scenario) return (S.intent = 'outscope', S.kind = 'scenario', S.E = bestNE, S);
@@ -1107,6 +1238,7 @@ function initAnalystBot(DATA){
       var multi = multiEntities(qn);
       if(multi.length >= 2) return (S.intent = 'compare', S.list = multi, S);
     }
+    if(best && best.type === 'nvline' && !isTop) return (S.intent = 'nvline', S.E = best, S);
     if(best && best.type === 'employee' && !isTop) return (S.intent = 'employee', S.E = best, S);
     if(I.hcStrong || (I.hcWeak && !best)){
       if(!(best && (best.type === 'gl' || best.type === 'cat') && !I.hcStrong)){
@@ -1217,6 +1349,9 @@ function initAnalystBot(DATA){
     { id:'free', icon:'ti-message-question', title:'Ask anything', sub:'Free questions across the whole board', sid:null, P:null, bk:null,
       scope:null, hint:'Ask about a vendor, account, category, quarter...', intro:function(){ var R = aHelp(); return R; } }
   ];
+
+  if(NV) SECTIONS.splice(6, 0, { id:'nv', icon:'ti-list-details', title:'No Vendor detail', sub:'Line items behind the No Vendor amounts', sid:'sec-nv', P:PF, bk:'p',
+    scope:'full year vs ' + PLAN, hint:'Ask about a No Vendor line item or account...', intro:function(){ return aNV(null, PF, 'p'); } });
 
   /* ---------------- UI ---------------- */
   var CSS = ''
