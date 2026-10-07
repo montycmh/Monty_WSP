@@ -11,7 +11,7 @@ openedWindows: new Map() // open individual board windows keyed by board index
 };
 const chartRefs = {};
 let REVIEW_MONTH_IDX = -1, REVIEW_Q_IDX = -1;
-let CURRENT_NV = null; // No Vendor line items of the board being rendered (compact form, see buildNvData)
+let CURRENT_NV = null; // No Vendor line items of the board being rendered
 const monthOrder = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const fiscalOrder = ['Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec','Jan'];
 const dom = {
@@ -626,25 +626,29 @@ function nvSlice(NV, code, months, bk){
 var g = null, i;
 if(!NV || !NV.gls) return null;
 for(i = 0; i < NV.gls.length; i++){ if(NV.gls[i].code === code){ g = NV.gls[i]; break; } }
-if(!g) return null;
+// Accounts without No Vendor line items in the feed (e.g. payroll) get no detail at all.
+if(!g || !g.items.some(function(it){ return it.nv; })) return null;
 function sum(a, ms){ var s = 0; ms.forEach(function(m){ s += (a && a[m]) || 0; }); return s; }
 var rm = NV.rm, fs = (NV.fStart === null || NV.fStart === undefined) ? 99 : NV.fStart;
 var proj = months.filter(function(m){ return m > rm; }), closed = months.filter(function(m){ return m <= rm; });
 function det(ms){ return bk === 'f' ? ms.filter(function(m){ return m >= fs; }) : ms; }
 var bd = g.board || { w:[], p:[], f:[] };
+// rows = only the line items that move Working away from the benchmark (|var| >= $1);
+// totals (detW/detB) still cover every line so the unexplained remainder is exact.
 var P = { months:proj, rows:[], detW:0, detB:0, boardW:sum(bd.w, proj), boardB:sum(bd[bk], proj) };
 var C = { months:closed, detMonths:det(closed), rows:[], boardW:sum(bd.w, closed), boardB:sum(bd[bk], closed), detB:0 };
 var V = [];
 g.items.forEach(function(it){
 if(!it.nv){ var vw = sum(it.w, proj), vb = sum(it[bk], det(months)); if(Math.abs(vw) >= 0.5 || Math.abs(vb) >= 0.5) V.push({ it:it, w:vw, b:vb }); return; }
 var w = sum(it.w, proj), b = sum(it[bk], det(proj));
-if(Math.abs(w) >= 0.5 || Math.abs(b) >= 0.5){ P.rows.push({ it:it, w:w, b:b, v:w - b }); P.detW += w; P.detB += b; }
+P.detW += w; P.detB += b;
+if(Math.abs(w - b) >= 1) P.rows.push({ it:it, w:w, b:b, v:w - b });
 var cb = sum(it[bk], C.detMonths);
 if(Math.abs(cb) >= 0.5){ C.rows.push({ it:it, b:cb }); C.detB += cb; }
 });
 P.rows.sort(function(a, b){ return Math.abs(b.v) - Math.abs(a.v); });
 C.rows.sort(function(a, b){ return Math.abs(b.b) - Math.abs(a.b); });
-P.unW = P.boardW - P.detW; P.unB = P.boardB - P.detB;
+P.unW = P.boardW - P.detW; P.unB = P.boardB - P.detB; P.unV = P.unW - P.unB;
 C.unB = sum(bd[bk], C.detMonths) - C.detB;
 return { gl:g, proj:P, closed:C, vend:V };
 }
@@ -655,23 +659,26 @@ function esc(x){ return String(x == null ? '' : x).replace(/&/g,'&amp;').replace
 function k(n, signed){ if(!isFinite(n) || Math.abs(n) < (signed ? 1 : 0.5)) return '—'; var a = Math.abs(n), t = a >= 1000 ? '$' + (a / 1000).toFixed(a >= 100000 ? 0 : 1) + 'K' : '$' + Math.round(a); if(signed) return (n > 0 ? '+' : '-') + t; return n < 0 ? '(' + t + ')' : t; }
 function vc(n){ return Math.abs(n) < 500 ? 'var-neu' : n < 0 ? 'var-fav' : 'var-unfav'; }
 function rng(ms){ var L = NV.months || []; if(!ms.length) return ''; return ms.length === 1 ? L[ms[0]] : L[ms[0]] + '–' + L[ms[ms.length - 1]]; }
-var bl = bk === 'f' ? 'FCST' : 'Plan', h = '<div class="nv-mini">';
-if(s.proj.months.length){
-h += '<div class="nv-mini-h">' + esc(rng(s.proj.months)) + ' · projected line items</div>';
-if(s.proj.rows.length || Math.abs(s.proj.unW) >= 0.5 || Math.abs(s.proj.unB) >= 0.5){
-h += '<table class="nv-mini-t"><thead><tr><th></th><th>Working</th><th>' + bl + '</th><th>Var</th></tr></thead><tbody>';
+var bl = bk === 'f' ? 'FCST' : 'Plan', body = '';
+var cv = s.closed.boardW - s.closed.boardB;
+if(s.proj.months.length && (s.proj.rows.length || Math.abs(s.proj.unV) >= 1)){
+body += '<div class="nv-mini-h">' + esc(rng(s.proj.months)) + ' · line items causing the variance</div>';
+body += '<table class="nv-mini-t"><thead><tr><th></th><th>Working</th><th>' + bl + '</th><th>Var</th></tr></thead><tbody>';
 s.proj.rows.forEach(function(r){
 var tagTxt = Math.abs(r.b) < 0.5 ? 'not in ' + bl : Math.abs(r.w) < 0.5 ? 'no Working' : '';
-h += '<tr><td>' + esc(r.it.d) + (tagTxt ? ' <span class="nv-tag">' + tagTxt + '</span>' : '') + '</td><td>' + k(r.w) + '</td><td>' + k(r.b) + '</td><td class="' + vc(r.v) + '">' + k(r.v, true) + '</td></tr>';
+body += '<tr><td>' + esc(r.it.d) + (tagTxt ? ' <span class="nv-tag">' + tagTxt + '</span>' : '') + '</td><td>' + k(r.w) + '</td><td>' + k(r.b) + '</td><td class="' + vc(r.v) + '">' + k(r.v, true) + '</td></tr>';
 });
-if(Math.abs(s.proj.unW) >= 0.5 || Math.abs(s.proj.unB) >= 0.5) h += '<tr class="nv-un"><td>Not explained by line items</td><td>' + k(s.proj.unW) + '</td><td>' + k(s.proj.unB) + '</td><td class="' + vc(s.proj.unW - s.proj.unB) + '">' + k(s.proj.unW - s.proj.unB, true) + '</td></tr>';
-h += '</tbody></table>';
-} else h += '<div class="nv-mini-note">No projected line items in this period.</div>';
+if(Math.abs(s.proj.unV) >= 1) body += '<tr class="nv-un"><td>Not explained by line items</td><td>' + k(s.proj.unW) + '</td><td>' + k(s.proj.unB) + '</td><td class="' + vc(s.proj.unV) + '">' + k(s.proj.unV, true) + '</td></tr>';
+body += '</tbody></table>';
 }
-if(s.closed.months.length){
-var cv = s.closed.boardW - s.closed.boardB;
-h += '<div class="nv-mini-note"><b>' + esc(rng(s.closed.months)) + ' actuals:</b> ' + k(s.closed.boardW) + ' vs ' + bl + ' ' + k(s.closed.boardB) + ' (<span class="' + vc(cv) + '">' + k(cv, true) + '</span>). Actuals carry no line detail' + (s.closed.rows.length ? '; planned lines: ' + s.closed.rows.slice(0, 4).map(function(r){ return esc(r.it.d) + ' ' + k(r.b); }).join(', ') + (s.closed.rows.length > 4 ? ', …' : '') : '') + '.</div>';
+if(s.closed.months.length && Math.abs(cv) >= 1){
+body += '<div class="nv-mini-note"><b>' + esc(rng(s.closed.months)) + ' actuals:</b> ' + k(s.closed.boardW) + ' vs ' + bl + ' ' + k(s.closed.boardB) + ' (<span class="' + vc(cv) + '">' + k(cv, true) + '</span>). Actuals carry no line detail' + (s.closed.rows.length ? '; planned lines: ' + s.closed.rows.slice(0, 4).map(function(r){ return esc(r.it.d) + ' ' + k(r.b); }).join(', ') + (s.closed.rows.length > 4 ? ', …' : '') : '') + '.</div>';
 }
+if(!body) return '';
+var h = '<div class="nv-mini">';
+(NV.warnings || []).forEach(function(w){ h += '<div class="nv-mini-warn">' + esc(w) + '</div>'; });
+if(bk === 'f') (NV.notes || []).forEach(function(n){ h += '<div class="nv-mini-note">' + esc(n) + '</div>'; });
+h += body;
 return h + '</div>';
 }
 function deriveModel(parsed){
@@ -908,7 +915,6 @@ ${renderVarianceSection('sec-qplan', `${model.meta.currentQuarterLabel} vs ${mod
 ${renderVarianceSection('sec-qfcst', `${model.meta.currentQuarterLabel} vs ${model.meta.forecastLabel}`, model.quarter.topFcst, model.quarter.driverBlocksFcst, model.quarter.l2Rows, 'f', model.quarter.monthLabels, model.quarter.expense.total.w, model.quarter.expense.total.f, model.meta.forecastLabel, model.quarter.expense)}
 ${renderYearSection('sec-fyplan', `Full Year vs ${model.meta.fyToken} Plan`, model.year.topPlan, model.year.driverBlocksPlan, model.year.l2Rows, 'p', model.year.expense.total.w, model.year.expense.total.p, `${model.meta.fyToken} Plan`, model.year.expense)}
 ${renderYearSection('sec-fyfcst', `Full Year vs ${model.meta.forecastLabel}`, model.year.topFcst, model.year.driverBlocksFcst, model.year.l2Rows, 'f', model.year.expense.total.w, model.year.expense.total.f, model.meta.forecastLabel, model.year.expense)}
-${renderNoVendor(model)}
 ${renderTE(model)}
 ${renderHC(model)}
 ${renderActions(model)}
@@ -1096,6 +1102,7 @@ ${block.vendors.map((v,i) => renderVendorRow(block.id, i, v, block)).join('')}
 function renderVendorRow(blockId, idx, vendor, block){
 const rowId = `${blockId}-${idx}`;
 const glTag = vendor.isNV && vendor.gl ? ` <span class="vrow-gl">· ${escapeHtml(vendor.gl)}</span>` : '';
+// No Vendor line items that cause the block's variance (empty when nothing varies -> no toggle).
 let nvDetail = '';
 if(vendor.isNV && vendor.glCode && CURRENT_NV && block && block.months){
 const mini = nvMiniHtml(CURRENT_NV, vendor.glCode, block.months, block.benchmarkKey);
@@ -1115,129 +1122,6 @@ ${nvDetail}
 function renderAdditionalComments(id){
 return [].map(i => `<div class="comment-row" id="${id}-${i}-row"><textarea class="vedit" rows="2" data-persist="comment:${id}-${i}" placeholder="Additional comment..."></textarea><button class="del-btn" data-del-row="${id}-${i}"><i class="ti ti-trash"></i></button></div>`).join('') +
 `<div class="inline-add"><input class="add-comment-input" data-add-input="${id}" placeholder="Add comment row..." /><button class="mini-btn" data-add-comment="${id}"><i class="ti ti-plus"></i></button></div>`;
-}
-// ---------- No Vendor Detail section ----------
-// Line amounts are small, so they use one decimal in K (the rest of the board rounds to whole K).
-function nvK(n, signed){
-if(!Number.isFinite(n) || Math.abs(n) < (signed ? 1 : 0.5)) return '—';
-const a = Math.abs(n);
-const t = a >= 1000 ? '$' + (a / 1000).toFixed(a >= 100000 ? 0 : 1) + 'K' : '$' + Math.round(a);
-if(signed) return (n > 0 ? '+' : '-') + t;
-return n < 0 ? '(' + t + ')' : t;
-}
-function nvVarClass(n){ return Math.abs(n) < 500 ? 'var-neu' : n < 0 ? 'var-fav' : 'var-unfav'; }
-function renderNoVendor(model){
-const NV = model.nv;
-const hdr = tag => `<div class="sec-hdr"><div class="sec-hdr-left"><span class="sec-ic"><i class="ti ti-list-details"></i></span><span class="sec-title">No Vendor Detail</span></div><span class="sec-tag">${escapeHtml(tag)}</span></div>`;
-if(!NV){
-return `<section class="sec" id="sec-nv">${hdr('No feed loaded')}<div class="comment-block" style="text-align:center;padding:30px 16px;color:#64748b;font-size:14px;font-weight:600"><i class="ti ti-info-circle" style="font-size:20px;display:block;margin-bottom:8px;color:#94a3b8"></i>Upload the optional NO VENDOR feed to see the line items behind the "No Vendor" amounts.</div></section>`;
-}
-const all = [0,1,2,3,4,5,6,7,8,9,10,11];
-const rm = NV.rm;
-const proj = all.filter(m => m > rm), closed = all.filter(m => m <= rm);
-const L = NV.months;
-const rng = ms => !ms.length ? '—' : (ms.length === 1 ? L[ms[0]] : `${L[ms[0]]}–${L[ms[ms.length - 1]]}`);
-const fs = (NV.fStart === null || NV.fStart === undefined) ? 99 : NV.fStart;
-const from = i => (i === null || i === undefined || i > 11) ? [] : all.filter(m => m >= Math.max(0, i));
-const sumM = (a, ms) => ms.reduce((s, m) => s + ((a && a[m]) || 0), 0);
-const fProj = proj.filter(m => m >= fs);
-const fClosed = closed.filter(m => m >= fs);
-
-let h = `<section class="sec" id="sec-nv">${hdr(`${NV.bu || 'No Vendor feed'} · ${NV.file || ''}`)}`;
-h += `<div class="nv-cov">
-<span class="nv-chip"><i class="ti ti-calendar-check"></i> Working detail: <b>${escapeHtml(rng(from(NV.wStart)))}</b></span>
-<span class="nv-chip"><i class="ti ti-target"></i> Plan detail: <b>${escapeHtml(rng(all))}</b></span>
-<span class="nv-chip"><i class="ti ti-chart-dots-3"></i> Forecast detail: <b>${escapeHtml(rng(from(NV.fStart)))}</b></span>
-<span class="nv-chip nv-chip-dim">Closed months (${escapeHtml(rng(closed))}) are actuals with no line detail</span>
-</div>`;
-NV.warnings.forEach(w => { h += `<div class="nv-alert warn"><i class="ti ti-alert-triangle"></i><span>${escapeHtml(w)}</span></div>`; });
-NV.notes.forEach(n => { h += `<div class="nv-alert info"><i class="ti ti-info-circle"></i><span>${escapeHtml(n)}</span></div>`; });
-
-// Totals for the accounts the feed covers (GLs with No Vendor line items). Accounts with
-// No Vendor amounts but no line items (e.g. payroll) are listed separately at the end.
-let tW = 0, tP = 0, tPW = 0, tPdet = 0, oW = 0, oN = 0;
-NV.gls.forEach(g => {
-const hasNv = g.items.some(it => it.nv);
-if(g.board && hasNv){ tW += sumM(g.board.w, all); tP += sumM(g.board.p, all); tPW += sumM(g.board.w, proj); }
-else if(g.board && !g.items.length){ oW += sumM(g.board.w, all); oN++; }
-g.items.filter(it => it.nv).forEach(it => { tPdet += sumM(it.w, proj); });
-});
-const covered = tPW ? Math.round(tPdet / tPW * 1000) / 10 : null;
-const kpi = (k, val, sub, cls) => `<div class="nv-kpi"><span class="k">${k}</span><span class="v">${val}</span><span class="s ${cls || ''}">${sub}</span></div>`;
-h += `<div class="nv-kpis">
-${kpi('No Vendor · FY Working', fmtKplain(tW), 'accounts with line items')}
-${kpi('No Vendor · FY Plan', fmtKplain(tP), `${fmtK(tW - tP)} vs Plan`, varClass(tW - tP))}
-${kpi(`Projected ${escapeHtml(rng(proj))}`, nvK(tPW), 'No Vendor Working, same accounts')}
-${kpi('Explained by line items', nvK(tPdet), covered === null ? '—' : `${covered}% of projected`)}
-</div>`;
-if(oN) h += `<div class="nv-other">Other No Vendor amounts without line items: <b>${fmtKplain(oW)}</b> FY Working in ${oN} account${oN > 1 ? 's' : ''} (listed at the end).</div>`;
-
-const withItems = NV.gls.filter(g => g.items.length);
-const noDetail = NV.gls.filter(g => !g.items.length && g.board);
-withItems.forEach(g => {
-const nvItems = g.items.filter(it => it.nv), vItems = g.items.filter(it => !it.nv);
-const bd = g.board;
-const fyW = bd ? sumM(bd.w, all) : 0, fyP = bd ? sumM(bd.p, all) : 0;
-const sP = nvSlice(NV, g.code, all, 'p'), sF = nvSlice(NV, g.code, all, 'f');
-h += `<div class="nv-gl" id="nv-${escapeHtml(g.code)}-wrap" data-gl-label="${escapeHtml(g.label)}">
-<div class="nv-gl-hdr"><div><div class="nv-gl-title">${escapeHtml(g.label)}</div><div class="nv-gl-sub">${escapeHtml(g.cat || 'Category not found in Year feed')}${bd ? '' : ' · not in Year feed'}</div></div>
-${bd ? `<div class="nv-gl-fig"><span>FY No Vendor</span><b>${fmtKplain(fyW)}</b> vs Plan ${fmtKplain(fyP)} <span class="${varClass(fyW - fyP)}">${fmtK(fyW - fyP)}</span></div>` : ''}</div>`;
-if(proj.length){
-const rows = nvItems.map(it => {
-const w = sumM(it.w, proj), p = sumM(it.p, proj), f = sumM(it.f, fProj);
-return { it, w, p, f };
-}).filter(r => Math.abs(r.w) >= 0.5 || Math.abs(r.p) >= 0.5 || Math.abs(r.f) >= 0.5)
-.sort((a, b) => Math.abs(b.w - b.p) - Math.abs(a.w - a.p));
-const dW = rows.reduce((s, r) => s + r.w, 0), dP = rows.reduce((s, r) => s + r.p, 0), dF = rows.reduce((s, r) => s + r.f, 0);
-const bW = sP.proj.boardW, bP = sP.proj.boardB, bF = sF.proj.boardB;
-h += `<div class="sublbl nv-sublbl">Projected · ${escapeHtml(rng(proj))}</div><div class="tbl-wrap"><table class="nv-t"><thead><tr><th>Line item</th><th>Working</th><th>Plan</th><th>Var vs Plan</th><th>Forecast</th><th>Var vs FCST</th></tr></thead><tbody>`;
-if(!rows.length) h += `<tr><td colspan="6" class="nv-none">No projected No Vendor line items for this account.</td></tr>`;
-rows.forEach(r => {
-const tagTxt = Math.abs(r.p) < 0.5 && Math.abs(r.w) >= 0.5 ? 'Not in Plan' : Math.abs(r.w) < 0.5 && Math.abs(r.p) >= 0.5 ? 'No Working' : '';
-h += `<tr><td><div class="nv-item">${escapeHtml(r.it.d)}${tagTxt ? ` <span class="nv-tag">${tagTxt}</span>` : ''}</div>${r.it.dt ? `<small>Contract ${escapeHtml(r.it.dt)}</small>` : ''}</td><td>${nvK(r.w)}</td><td>${nvK(r.p)}</td><td class="${nvVarClass(r.w - r.p)}">${nvK(r.w - r.p, true)}</td><td>${nvK(r.f)}</td><td class="${nvVarClass(r.w - r.f)}">${nvK(r.w - r.f, true)}</td></tr>`;
-});
-if(rows.length) h += `<tr class="nv-sum"><td>Line items total</td><td>${nvK(dW)}</td><td>${nvK(dP)}</td><td class="${nvVarClass(dW - dP)}">${nvK(dW - dP, true)}</td><td>${nvK(dF)}</td><td class="${nvVarClass(dW - dF)}">${nvK(dW - dF, true)}</td></tr>`;
-if(bd){
-h += `<tr class="nv-board"><td>No Vendor per Year feed</td><td>${nvK(bW)}</td><td>${nvK(bP)}</td><td class="${nvVarClass(bW - bP)}">${nvK(bW - bP, true)}</td><td>${nvK(bF)}</td><td class="${nvVarClass(bW - bF)}">${nvK(bW - bF, true)}</td></tr>`;
-const uW = bW - dW, uP = bP - dP, uF = bF - dF;
-if(Math.abs(uW) >= 0.5 || Math.abs(uP) >= 0.5 || Math.abs(uF) >= 0.5) h += `<tr class="nv-un"><td>Not explained by line items</td><td>${nvK(uW)}</td><td>${nvK(uP)}</td><td class="${nvVarClass(uW - uP)}">${nvK(uW - uP, true)}</td><td>${nvK(uF)}</td><td class="${nvVarClass(uW - uF)}">${nvK(uW - uF, true)}</td></tr>`;
-else h += `<tr class="nv-ok"><td colspan="6"><i class="ti ti-circle-check"></i> Line items reconcile to the Year feed for ${escapeHtml(rng(proj))}.</td></tr>`;
-}
-h += `</tbody></table></div>`;
-}
-if(closed.length){
-const cW = bd ? sumM(bd.w, closed) : 0, cP = bd ? sumM(bd.p, closed) : 0, cF = bd ? sumM(bd.f, closed) : 0;
-const planned = sP.closed.rows;
-const fcstByItem = new Map(sF.closed.rows.map(r => [r.it, r.b]));
-h += `<details class="nv-closed"><summary><span><b>Closed · ${escapeHtml(rng(closed))}</b> · actual No Vendor ${fmtKplain(cW)} vs Plan ${fmtKplain(cP)} <span class="${varClass(cW - cP)}">${fmtK(cW - cP)}</span></span><span class="nv-closed-hint">Planned lines</span></summary>`;
-h += `<p class="nv-closed-note">Actuals arrive from the GL as one No Vendor amount, so they have no line detail. Below is what the Plan${fClosed.length ? ` and the Forecast (${escapeHtml(rng(fClosed))})` : ''} expected for these months.</p>`;
-if(planned.length || fcstByItem.size){
-const its = Array.from(new Set(planned.map(r => r.it).concat(Array.from(fcstByItem.keys()))));
-h += `<div class="tbl-wrap"><table class="nv-t"><thead><tr><th>Line item</th><th>Plan ${escapeHtml(rng(closed))}</th>${fClosed.length ? `<th>Forecast ${escapeHtml(rng(fClosed))}</th>` : ''}</tr></thead><tbody>`;
-its.forEach(it => {
-const pr = planned.find(r => r.it === it);
-h += `<tr><td><div class="nv-item">${escapeHtml(it.d)}</div></td><td>${nvK(pr ? pr.b : 0)}</td>${fClosed.length ? `<td>${nvK(fcstByItem.get(it) || 0)}</td>` : ''}</tr>`;
-});
-h += `<tr class="nv-board"><td>Actual No Vendor (Year feed)</td><td>${nvK(cW)}</td>${fClosed.length ? `<td>${nvK(sumM(bd ? bd.w : [], fClosed))}</td>` : ''}</tr>`;
-h += `</tbody></table></div>`;
-} else h += `<p class="nv-closed-note">No planned line items for these months.</p>`;
-h += `</details>`;
-}
-if(vItems.length){
-h += `<div class="nv-vend"><i class="ti ti-building-store"></i><span>Also in the feed with a named vendor (shown in the vendor rows, not part of No Vendor): ${vItems.map(it => `<b>${escapeHtml(it.v)}</b> · ${escapeHtml(it.d)}`).join('; ')}</span></div>`;
-}
-h += `<div class="nv-comment"><textarea class="vedit" rows="2" data-persist="comment:nv-${escapeHtml(g.code)}" placeholder="Add context for the No Vendor lines in this account..."></textarea></div>`;
-h += `</div>`;
-});
-if(noDetail.length){
-h += `<div class="sublbl">No Vendor amounts without line detail</div><div class="tbl-wrap"><table class="nv-t"><thead><tr><th>GL account</th><th>FY Working</th><th>FY Plan</th><th>Var vs Plan</th></tr></thead><tbody>`;
-noDetail.forEach(g => {
-const w = sumM(g.board.w, all), p = sumM(g.board.p, all);
-h += `<tr><td><div class="nv-item">${escapeHtml(g.label)}</div><small>${escapeHtml(g.cat || '')}</small></td><td>${fmtKplain(w)}</td><td>${fmtKplain(p)}</td><td class="${varClass(w - p)}">${fmtK(w - p)}</td></tr>`;
-});
-h += `</tbody></table></div>`;
-}
-return h + `</section>`;
 }
 function renderNoActivity(id, icon, title, tag){
 return `<section class="sec" id="${id}"><div class="sec-hdr"><div class="sec-hdr-left"><span class="sec-ic"><i class="ti ${icon}"></i></span><span class="sec-title">${escapeHtml(title)}</span></div><span class="sec-tag">${escapeHtml(tag)}</span></div><div class="comment-block" style="text-align:center;padding:30px 16px;color:#64748b;font-size:14px;font-weight:600"><i class="ti ti-info-circle" style="font-size:20px;display:block;margin-bottom:8px;color:#94a3b8"></i>No activity registered for this period.</div></section>`;
@@ -1545,7 +1429,7 @@ document.querySelectorAll('aside nav ul li[data-nav]').forEach(function(li){
 li.addEventListener('click', function(){ navTo(li.dataset.nav, li); });
 });
 function scrollSpy(){
-var sections = ['sec-overview','sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst','sec-nv','sec-te','sec-hc','sec-actions'];
+var sections = ['sec-overview','sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst','sec-te','sec-hc','sec-actions'];
 var navItems = document.querySelectorAll('aside nav ul li[data-nav]');
 var scrollY = window.scrollY + 80;
 var current = 0;
@@ -1641,7 +1525,7 @@ function addAction(){var list=document.getElementById('actList');if(!list)return
 function downloadHtml(){try{syncEditableValues(document);var clone=document.documentElement.cloneNode(true);clone.querySelectorAll('#toast').forEach(function(el){el.remove();});var html='<!DOCTYPE html>\\n'+clone.outerHTML;var blob=new Blob([html],{type:'text/html'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=FILE_BASE+'.html';a.click();URL.revokeObjectURL(a.href);toast('HTML downloaded');}catch(error){console.error(error);toast('Could not export HTML');}}
 function downloadPdf(){if(typeof html2canvas==='undefined'||!window.jspdf){toast('PDF libraries did not load');return;}saveState(false);var target=document.querySelector('.main-workspace');if(!target){toast('Could not find dashboard content');return;}var hiddenEls=Array.prototype.slice.call(target.querySelectorAll('.hidden, .del-btn, .del-block, .add-act, .mini-btn, .ghost-btn, .topbar-actions, #back-nav, #home-nav'));var restore=hiddenEls.map(function(el){return [el,el.style.display];});var aside=document.querySelector('aside');var asideDisplay=aside?aside.style.display:null;var prevML=target.style.marginLeft,prevW=target.style.width;toast('Building PDF...');hiddenEls.forEach(function(el){el.style.display='none';});if(aside)aside.style.display='none';target.style.marginLeft='0';target.style.width='100%';setTimeout(function(){html2canvas(target,{scale:2,useCORS:true,backgroundColor:'#f8fafc'}).then(function(canvas){var jsPDF=window.jspdf.jsPDF;var pdf=new jsPDF('p','pt','a4');var pageWidth=pdf.internal.pageSize.getWidth();var pageHeight=pdf.internal.pageSize.getHeight();var ratio=canvas.width/pageWidth;var pageHeightPx=Math.max(1,Math.floor(pageHeight*ratio));var rendered=0,first=true;while(rendered<canvas.height){var sh=Math.min(pageHeightPx,canvas.height-rendered);var sc=document.createElement('canvas');sc.width=canvas.width;sc.height=sh;sc.getContext('2d').drawImage(canvas,0,rendered,canvas.width,sh,0,0,canvas.width,sh);var img=sc.toDataURL('image/jpeg',0.92);if(!first)pdf.addPage();pdf.addImage(img,'JPEG',0,0,pageWidth,sh/ratio);rendered+=sh;first=false;}pdf.save(FILE_BASE+'.pdf');toast('PDF downloaded');}).catch(function(error){console.error(error);toast('Could not export PDF');}).then(function(){restore.forEach(function(pair){pair[0].style.display=pair[1];});if(aside)aside.style.display=asideDisplay;target.style.marginLeft=prevML;target.style.width=prevW;});},60);}
 function navTo(sectionId,el){var target=document.getElementById(sectionId);if(!target)return;var top=target.getBoundingClientRect().top+window.scrollY-20;window.scrollTo({top:top,behavior:'smooth'});document.querySelectorAll('aside nav ul li[data-nav]').forEach(function(li){li.classList.remove('active');});if(el)el.classList.add('active');}
-function scrollSpy(){var sections=['sec-overview','sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst','sec-nv','sec-te','sec-hc','sec-actions'];var navItems=document.querySelectorAll('aside nav ul li[data-nav]');var sy=window.scrollY+80;var current=0;sections.forEach(function(id,i){var el=document.getElementById(id);if(el&&el.offsetTop<=sy)current=i;});navItems.forEach(function(li){li.classList.remove('active');});if(navItems[current])navItems[current].classList.add('active');}
+function scrollSpy(){var sections=['sec-overview','sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst','sec-te','sec-hc','sec-actions'];var navItems=document.querySelectorAll('aside nav ul li[data-nav]');var sy=window.scrollY+80;var current=0;sections.forEach(function(id,i){var el=document.getElementById(id);if(el&&el.offsetTop<=sy)current=i;});navItems.forEach(function(li){li.classList.remove('active');});if(navItems[current])navItems[current].classList.add('active');}
 document.body.addEventListener('click',function(e){var target=e.target;if(!target.closest)return;var delRow=target.closest('[data-del-row]');if(delRow){var id=delRow.dataset.delRow;var row=document.getElementById(id+'-row')||document.getElementById(id);if(row)row.classList.add('hidden');saveState(true);updateActionCounter();return;}var delBlock=target.closest('[data-del-block]');if(delBlock){var wrap=document.getElementById(delBlock.dataset.delBlock+'-wrap');if(wrap)wrap.classList.add('hidden');saveState(true);return;}var addComment=target.closest('[data-add-comment]');if(addComment){addCommentRow(addComment.dataset.addComment);return;}if(target.closest('#add-act')){addAction();return;}if(target.closest('#save-nav')){saveState(true);return;}if(target.closest('#download-nav')){downloadHtml();return;}if(target.closest('#download-pdf-nav')){downloadPdf();return;}var nav=target.closest('aside nav ul li[data-nav]');if(nav){navTo(nav.dataset.nav,nav);return;}});
 document.body.addEventListener('input',function(e){if(e.target&&e.target.matches&&e.target.matches('[data-persist]')){autoResize(e.target);saveState(false);}});
 document.body.addEventListener('change',function(e){if(e.target&&e.target.matches&&e.target.matches('[data-act-cb]')){updateActionCounter();saveState(false);}});
@@ -2297,7 +2181,7 @@ document.querySelectorAll('aside nav ul li[data-nav]').forEach(li => li.classLis
 if(el) el.classList.add('active');
 }
 function scrollSpy(){
-const sections = ['sec-overview','sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst','sec-nv','sec-te','sec-hc','sec-actions'];
+const sections = ['sec-overview','sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst','sec-te','sec-hc','sec-actions'];
 const navItems = document.querySelectorAll('aside nav ul li[data-nav]');
 const scrollY = window.scrollY + 80;
 let current = 0;
@@ -2501,7 +2385,7 @@ function bar(v){
 var wPct=Math.min(100,Math.abs(v.working)/maxVal*100), bPct=Math.min(100,Math.abs(v.benchmark)/maxVal*100), over=v.variance>0;
 var vu=v.benchmark?((v.variance>0?'+':'')+Math.round(v.variance/v.benchmark*100)+'%'):(v.working?'not in plan':'—');
 var nvh=(v.nv && data.nv && typeof nvMiniHtml==='function') ? nvMiniHtml(data.nv, v.nv, ctx.months||[], ctx.bk||'p') : '';
-return '<div class="drill-bar-row"><div class="drill-bar-top"><span class="drill-bar-left"><span class="drill-bar-name">'+esc(v.name)+'</span>'+(v.gl?'<button class="drill-gl-btn" type="button" title="Show GL account"><i class="ti ti-eye"></i></button>':'')+(nvh?'<button class="drill-nv-btn" type="button" title="Show No Vendor line items"><i class="ti ti-list-details"></i></button>':'')+'</span><span class="drill-bar-fig">'+fmtKplain(v.working)+' / '+fmtKplain(v.benchmark)+'</span></div><div class="drill-track"><div class="drill-fill '+(over?'unfav':'fav')+'" style="width:'+wPct+'%"></div>'+(v.benchmark?'<div class="drill-plan-marker" style="left:'+bPct+'%"></div>':'')+'</div><div class="drill-util '+(over?'var-unfav':'var-fav')+'">'+esc(vu)+' vs '+esc(ctx.benchmarkLabel.toLowerCase())+' · '+fmtK(v.variance)+'</div>'+(v.gl?'<div class="drill-gl-line"><i class="ti ti-receipt-2"></i>GL account · '+esc(v.gl)+'</div>':'')+(nvh?'<div class="drill-nv">'+nvh+'</div>':'')+'</div>';
+return '<div class="drill-bar-row'+(nvh?' nv-open':'')+'"><div class="drill-bar-top"><span class="drill-bar-left"><span class="drill-bar-name">'+esc(v.name)+'</span>'+(v.gl?'<button class="drill-gl-btn" type="button" title="Show GL account"><i class="ti ti-eye"></i></button>':'')+(nvh?'<button class="drill-nv-btn" type="button" title="Show No Vendor line items"><i class="ti ti-list-details"></i></button>':'')+'</span><span class="drill-bar-fig">'+fmtKplain(v.working)+' / '+fmtKplain(v.benchmark)+'</span></div><div class="drill-track"><div class="drill-fill '+(over?'unfav':'fav')+'" style="width:'+wPct+'%"></div>'+(v.benchmark?'<div class="drill-plan-marker" style="left:'+bPct+'%"></div>':'')+'</div><div class="drill-util '+(over?'var-unfav':'var-fav')+'">'+esc(vu)+' vs '+esc(ctx.benchmarkLabel.toLowerCase())+' · '+fmtK(v.variance)+'</div>'+(v.gl?'<div class="drill-gl-line"><i class="ti ti-receipt-2"></i>GL account · '+esc(v.gl)+'</div>':'')+(nvh?'<div class="drill-nv">'+nvh+'</div>':'')+'</div>';
 }
 var unfav=shown.filter(function(v){return v.variance>0;}).sort(function(a,b){return b.variance-a.variance;});
 var fav=shown.filter(function(v){return v.variance<0;}).sort(function(a,b){return a.variance-b.variance;});
