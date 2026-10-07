@@ -1,1603 +1,2483 @@
-/* ============================================================
-   FP&A Analyst Bot — rule-based Q&A for the BvA board.
-   - No AI model, no network calls: intent rules + the board's own data.
-   - Questions in English or Spanish; answers in English.
-   - Fully self-contained: app.js serializes this function with
-     toString() into every exported board, so it must not reference
-     anything outside its own body (DOM APIs only).
-   ============================================================ */
-function initAnalystBot(DATA){
-  var d = document;
-  ['fpa-bot-root','fpa-bot-style'].forEach(function(id){ var e = d.getElementById(id); if(e && e.parentNode) e.parentNode.removeChild(e); });
-  if(!DATA || !DATA.rows || !DATA.rows.length) return null;
-
-  /* ---------------- meta & periods ---------------- */
-  var META = DATA.meta || {};
-  var MONTHS = (DATA.monthLabels && DATA.monthLabels.length === 12) ? DATA.monthLabels : ['Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec','Jan'];
-  var QL = (DATA.quarterLabels && DATA.quarterLabels.length === 4) ? DATA.quarterLabels : ['Q1','Q2','Q3','Q4'];
-  var RM = (typeof META.monthIdx === 'number' && META.monthIdx >= 0 && META.monthIdx < 12) ? META.monthIdx : 0;
-  var RQ = Math.floor(RM / 3);
-  var PLAN = META.planLabel || 'Plan';
-  var FCST = META.fcstLabel || 'Forecast';
-  var BU = META.code || 'BU';
-  var FY = META.fy || 'FY';
-  var CAL = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
-  var startCal = CAL.indexOf(String(MONTHS[0]).slice(0,3).toLowerCase());
-  if(startCal < 0) startCal = 1;
-  function fiscalOf(cal){ return (cal - startCal + 12) % 12; }
-  var THR = { m:10000, q:25000, ytd:50000, fy:75000 };
-
-  /* ---------------- formatting ---------------- */
-  function esc(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-  function norm(s){
-    return String(s == null ? '' : s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')
-      .replace(/&/g,' and ').replace(/[^a-z0-9+#\s]/g,' ').replace(/\s+/g,' ').trim();
-  }
-  function fm(n){
-    n = Number(n) || 0; var a = Math.abs(n), s;
-    if(a >= 1e6) s = '$' + (a/1e6).toFixed(2) + 'M';
-    else if(a >= 1e3) s = '$' + (a/1e3).toFixed(1) + 'K';
-    else s = '$' + Math.round(a).toLocaleString('en-US');
-    return (n < 0 && Math.round(a) !== 0 ? '-' : '') + s;
-  }
-  function fv(n){ n = Number(n) || 0; if(Math.abs(n) < 0.5) return '$0'; return (n > 0 ? '+' : '-') + fm(Math.abs(n)); }
-  function pct(v, b){ if(!b || Math.abs(b) < 1) return null; var p = v / Math.abs(b) * 100; return (p > 0 ? '+' : '') + p.toFixed(1) + '%'; }
-  function pctPlain(a, b){ if(!b || Math.abs(b) < 1) return '—'; return (a / b * 100).toFixed(0) + '%'; }
-  function cls(v, thr){ if(Math.abs(v) < (thr || 1)) return 'fb-neu'; return v > 0 ? 'fb-bad' : 'fb-good'; }
-  function verdict(v, thr){ if(Math.abs(v) < (thr || 1)) return 'in line'; return v > 0 ? 'unfavorable' : 'favorable'; }
-  function tag(v, thr){ return '<span class="fb-tag ' + cls(v, thr) + '">' + verdict(v, thr) + '</span>'; }
-  function vspan(v, thr){ return '<span class="' + cls(v, thr) + '">' + fv(v) + '</span>'; }
-  function bName(bk){ return bk === 'f' ? FCST : PLAN; }
-  function pLabel(P){
-    if(!P) return '';
-    if(P.t === 'm') return MONTHS[P.i];
-    if(P.t === 'q') return QL[P.i];
-    if(P.t === 'ytd') return 'YTD (' + MONTHS[0] + ' – ' + MONTHS[RM] + ')';
-    return FY + ' full year';
-  }
-  function samePeriod(a, b){ return a && b && a.t === b.t && (a.i || 0) === (b.i || 0); }
-  function thrOf(P, scale){ return (THR[P.t] || 25000) * (scale || 1); }
-
-  /* ---------------- values ---------------- */
-  function rowVal(r, P){
-    var a;
-    if(P.t === 'm') a = r.M && r.M[P.i];
-    else if(P.t === 'q') a = r.Q && r.Q[P.i];
-    else if(P.t === 'fy') a = r.T;
-    else {
-      a = [0,0,0];
-      for(var k = 0; k <= RM; k++){ var mm = r.M && r.M[k]; if(mm) a = [a[0]+mm[0], a[1]+mm[1], a[2]+mm[2]]; }
-    }
-    a = a || [0,0,0];
-    return { w:+a[0] || 0, p:+a[1] || 0, f:+a[2] || 0 };
-  }
-  function sumVals(rows, P){
-    var o = { w:0, p:0, f:0 };
-    rows.forEach(function(r){ var x = rowVal(r, P); o.w += x.w; o.p += x.p; o.f += x.f; });
-    return o;
-  }
-  function withB(o, bk){ o.b = bk === 'f' ? o.f : o.p; o.v = o.w - o.b; o.vp = o.w - o.p; o.vf = o.w - o.f; return o; }
-  function ev(E, P, bk){ return withB(sumVals(E.rows, P), bk); }
-
-  /* ---------------- index: categories, accounts, vendors ---------------- */
-  function splitCode(label){
-    var m = String(label).match(/^\s*(\d{3,})\s*-\s*(.*)$/);
-    return m ? { code:m[1], name:m[2].trim() } : { code:'', name:String(label).replace(/\s*-\s*$/,'').trim() };
-  }
-  var CATS = [], GLS = [], VEND = {}, VLIST = [], VROWS = [], TOTAL = null, pendV = [], pendG = [];
-  DATA.rows.forEach(function(r){
-    if(r.t === 'vendor' || r.t === 'novendor'){ pendV.push(r); return; }
-    if(r.t === 'gl'){
-      var sc = splitCode(r.l);
-      var g = { type:'gl', key:'gl:' + sc.code, label:r.l, name:sc.name, code:sc.code, rows:[r], vrows:pendV.slice() };
-      GLS.push(g); pendG.push(g); pendV = []; return;
-    }
-    if(r.t === 'l2'){
-      var c = { type:'cat', key:'cat:' + norm(r.l), label:r.l, name:String(r.l).replace(/^Total\s+/i,'').replace(/\s+/g,' ').trim(), code:'', rows:[r], gls:pendG.slice() };
-      pendG.forEach(function(gg){ gg.cat = c; });
-      CATS.push(c); pendG = []; pendV = []; return;
-    }
-    if(r.t === 'expense'){ TOTAL = { type:'total', key:'total', label:r.l, name:BU + ' total expense', code:'', rows:[r] }; }
-  });
-  if(!TOTAL) TOTAL = { type:'total', key:'total', label:'Expense', name:BU + ' total expense', code:'', rows:CATS.map(function(c){ return c.rows[0]; }) };
-  GLS.forEach(function(g){
-    g.vrows.forEach(function(r){
-      var sc = splitCode(r.l), nov = r.t === 'novendor' || /^no vendor/i.test(r.l);
-      var name = nov ? 'No Vendor' : sc.name;
-      var key = 'v:' + (nov ? 'novendor' : (sc.code || norm(name)));
-      var V = VEND[key];
-      if(!V){ V = VEND[key] = { type:'vendor', key:key, label:r.l, name:name, code:nov ? '' : sc.code, rows:[], pairs:[], nov:nov }; VLIST.push(V); }
-      V.rows.push(r); V.pairs.push({ row:r, gl:g });
-      VROWS.push({ row:r, gl:g, cat:g.cat || null, vendor:V });
-    });
-  });
-
-  /* ---------------- index: people (HC + T&E) ---------------- */
-  var HC = DATA.hc || null, TE = DATA.te || null, EMPS = {}, ELIST = [];
-  function getEmp(raw){
-    raw = String(raw || '').trim();
-    if(!raw || /^no employee/i.test(raw) || /^total$/i.test(raw)) return null;
-    var tbh = /^TBH\b/i.test(raw);
-    var name = tbh ? raw : raw.replace(/\s+-\s+\S+$/,'').trim();
-    var key = 'e:' + norm(name), E = EMPS[key];
-    if(!E){ E = EMPS[key] = { type:'employee', key:key, label:raw, name:name, code:'', tbh:tbh, hc:null, te:[], ids:[] }; ELIST.push(E); }
-    var idm = raw.match(/\s-\s(\S+)\s*$/); if(idm) E.ids.push(norm(idm[1]).replace(/\s+/g,''));
-    return E;
-  }
-  if(HC && HC.employees) HC.employees.forEach(function(e){ var E = getEmp(e.n); if(E) E.hc = e; });
-  if(TE && TE.rows) TE.rows.forEach(function(t){ var E = getEmp(t.e); if(E) E.te.push(t); });
-
-  /* ---------------- entity matching ---------------- */
-  var NAME_SKIP = { tbh:1, inc:1, llc:1, ltd:1, limited:1, corp:1, co:1, the:1, and:1, of:1, for:1, total:1, private:1, a:1 };
-  var NAME_LOW = { services:1, service:1, expensed:1, expense:1, exp:1, other:1, fees:1, online:1, non:1, client:1 };
-  var QSTOP = ('what whats which who whom where when why how much many is are was were be been being the a an of in on at for to from by '
-    + 'vs versus against compared compare with and or our we us i me my you your it its this that these those there here do does did done doing going '
-    + 'can could would should will please show give tell list about explain describe see view display get find look up down so any all some '
-    + 'spend spent spending cost costs expense expenses variance variances var plan planned budget budgeted forecast fcst fc working actual actuals '
-    + 'top biggest largest main major key drivers driver vendor vendors supplier suppliers account accounts gl gls category categories line lines '
-    + 'month months monthly quarter quarters quarterly year years yearly annual full fy ytd qtd mtd date current last previous next '
-    + 'favorable unfavorable fav unfav over under above below summary overview trend utilization remaining left status '
-    + 'que cual cuales cuanto cuanta cuantos cuantas como de del la el los las lo en por para con contra y o u un una unos unas al es son fue esta este estos estas esa ese '
-    + 'gasto gastos gastamos gastado presupuesto pronostico varianza variacion mes meses trimestre trimestres ano anos anual proveedor proveedores cuenta cuentas categoria categorias '
-    + 'mayor mayores principales principal resumen tendencia dame muestra muestrame dime explica sobre porque paso pasa pasando vamos va estamos hay tiene tenemos me nos se su sus '
-    + 'buffer buffers parked park reallocated real projected projection proyectado closed excluding underlying savings ahorro ahorros where donde '
-    + 'driving drove drive cause causing reason happened happening going doing tracking running look trending breakdown detail details '
-    + 'mas employee employees empleado empleados person people persona personas who quien same now ahora mismo k m usd dollars much number numbers amount amounts value values total totals overall entire whole').split(' ');
-  var QSTOPSET = {}; QSTOP.forEach(function(w){ QSTOPSET[w] = 1; });
-  var MONTHWORDS = { jan:0, january:0, ene:0, enero:0, feb:1, february:1, febrero:1, mar:2, march:2, marzo:2, apr:3, april:3, abr:3, abril:3,
-    may:4, mayo:4, jun:5, june:5, junio:5, jul:6, july:6, julio:6, aug:7, august:7, ago:7, agosto:7, sep:8, sept:8, september:8, septiembre:8, setiembre:8,
-    oct:9, october:9, octubre:9, nov:10, november:10, noviembre:10, dec:11, december:11, dic:11, diciembre:11 };
-
-  function prep(E){
-    var toks = [];
-    norm(E.name).split(' ').forEach(function(t){
-      if(t.length < 2 || NAME_SKIP[t]) return;
-      if(toks.some(function(x){ return x.t === t; })) return;
-      toks.push({ t:t, w:NAME_LOW[t] ? 0.35 : 1 });
-    });
-    E._toks = toks;
-    E._full = norm(E.name);
-    E._codes = [];
-    if(E.code) E._codes.push(E.code);
-    (E.ids || []).forEach(function(x){ if(x) E._codes.push(x); });
-  }
-  function lev(a, b){
-    if(a === b) return 0;
-    var m = a.length, n = b.length, prev = [], cur, i, j;
-    for(j = 0; j <= n; j++) prev[j] = j;
-    for(i = 1; i <= m; i++){
-      cur = [i];
-      for(j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j-1] + 1, prev[j-1] + (a[i-1] === b[j-1] ? 0 : 1));
-      prev = cur;
-    }
-    return prev[n];
-  }
-  function tokScore(qt, et){
-    if(qt === et) return 1;
-    if(qt.length >= 3 && et.length > qt.length && et.indexOf(qt) === 0) return qt.length >= 4 ? 0.85 : 0.7;
-    if(qt.length >= 5 && et.length >= 5 && Math.abs(qt.length - et.length) <= 2 && lev(qt, et) <= (et.length >= 8 ? 2 : 1)) return 0.75;
-    return 0;
-  }
-  function scoreEntity(E, qts, qn){
-    if(!E._toks) prep(E);
-    var tot = 0, got = 0;
-    E._toks.forEach(function(t){
-      tot += t.w;
-      var best = 0;
-      qts.forEach(function(qt){ var s = tokScore(qt, t.t); if(s > best) best = s; });
-      got += best * t.w;
-    });
-    var codeHit = E._codes.some(function(c){ return qts.indexOf(c) >= 0; });
-    if(!got && !codeHit) return 0;
-    var s = got + (tot ? got / tot : 0) * 0.5 + (codeHit ? 10 : 0);
-    if(E._full.length >= 4 && (' ' + qn + ' ').indexOf(' ' + E._full + ' ') >= 0) s += 3;
-    return s;
-  }
-  /* ---------------- index: No Vendor line items (optional NO VENDOR feed) ----------------
-     DATA.nv.gls[] = { code, label, cat, board:{w,p,f}[12] (No Vendor rows of the Year feed) | null,
-                       items:[{ d, v, nv, w[12], p[12], f[12], dt }] }
-     Working line items exist only after the review month (closed months are actuals without
-     line detail); Forecast line items start at DATA.nv.fStart.                                 */
-  var NV = (DATA.nv && DATA.nv.gls && DATA.nv.gls.length) ? DATA.nv : null;
-  var NVFS = NV && NV.fStart !== null && NV.fStart !== undefined ? NV.fStart : 99;
-  var NVL = [];
-  function nvG(code){ if(!NV) return null; for(var i = 0; i < NV.gls.length; i++){ if(NV.gls[i].code === code) return NV.gls[i]; } return null; }
-  function nvSum(a, ms){ var s = 0; ms.forEach(function(m){ s += (a && a[m]) || 0; }); return s; }
-  if(NV) NV.gls.forEach(function(g){
-    g.items.forEach(function(it, i){ NVL.push({ type:'nvline', key:'nl:' + g.code + ':' + i, label:it.d, name:it.d, code:'', it:it, g:g }); });
-  });
-  // Same split as the board: projected months get line-level Working vs benchmark,
-  // closed months only have the actual No Vendor total next to the planned lines.
-  function nvSplit(g, months, bk){
-    var proj = months.filter(function(m){ return m > RM; }), closed = months.filter(function(m){ return m <= RM; });
-    function det(ms){ return bk === 'f' ? ms.filter(function(m){ return m >= NVFS; }) : ms; }
-    var bd = g.board || { w:[], p:[], f:[] };
-    var o = { proj:proj, closed:closed, rows:[], plan:[], detW:0, detB:0,
-      boardW:nvSum(bd.w, proj), boardB:nvSum(bd[bk], proj), cW:nvSum(bd.w, closed), cB:nvSum(bd[bk], closed) };
-    g.items.forEach(function(it){
-      if(!it.nv) return;
-      var w = nvSum(it.w, proj), b = nvSum(it[bk], det(proj));
-      if(Math.abs(w) >= 0.5 || Math.abs(b) >= 0.5){ o.rows.push({ it:it, w:w, b:b, v:w - b }); o.detW += w; o.detB += b; }
-      var cb = nvSum(it[bk], det(closed));
-      if(Math.abs(cb) >= 0.5) o.plan.push({ it:it, b:cb });
-    });
-    o.rows.sort(function(a, b){ return Math.abs(b.v) - Math.abs(a.v); });
-    o.plan.sort(function(a, b){ return Math.abs(b.b) - Math.abs(a.b); });
-    o.unW = o.boardW - o.detW; o.unB = o.boardB - o.detB;
-    return o;
-  }
-  // Names of the line items that move a GL away from its benchmark in one month (sign > 0: above).
-  function nvNames(code, m, bk, sign){
-    var g = nvG(code); if(!g || m <= RM) return [];
-    return g.items.filter(function(it){ return it.nv; })
-      .map(function(it){ return { d:it.d, x:((it.w && it.w[m]) || 0) - (m >= NVFS || bk !== 'f' ? ((it[bk] && it[bk][m]) || 0) : 0) }; })
-      .filter(function(r){ return sign > 0 ? r.x >= 100 : r.x <= -100; })
-      .sort(function(a, b){ return Math.abs(b.x) - Math.abs(a.x); })
-      .map(function(r){ return r.d; });
-  }
-  function nvNamesList(list, bk, sign){
-    var seen = {}, out = [];
-    list.forEach(function(e){ nvNames(e.gl.code, e.m, bk, sign).forEach(function(n){ if(!seen[n]){ seen[n] = 1; out.push(n); } }); });
-    return out;
-  }
-  var ALL = [].concat(CATS, GLS, VLIST.filter(function(v){ return !v.nov; }), ELIST, NVL);
-  var TYPE_BONUS = { cat:0.3, gl:0.2, vendor:0.1, employee:0.05, nvline:0 };
-  function queryTokens(qn){
-    return qn.split(' ').filter(function(t){
-      if(!t || QSTOPSET[t] || MONTHWORDS.hasOwnProperty(t)) return false;
-      if(/^q[1-4]$/.test(t) || /^fy\d*$/.test(t) || /^\d{1,2}$/.test(t) || /^20\d\d$/.test(t)) return false;
-      return t.length >= 2;
-    });
-  }
-  function findEntities(qn, hint, types){
-    var qts = queryTokens(qn), res = [];
-    if(/\bno vendor\b|\bsin proveedor\b/.test(qn) && VEND['v:novendor']) res.push({ E:VEND['v:novendor'], s:99 });
-    if(!qts.length) return res;
-    ALL.forEach(function(E){
-      if(types && types.indexOf(E.type) < 0) return;
-      var s = scoreEntity(E, qts, qn);
-      if(s < 0.95) return;
-      if(hint && E.type === hint) s += 0.6;
-      s += TYPE_BONUS[E.type] || 0;
-      res.push({ E:E, s:s });
-    });
-    res.sort(function(a, b){ return b.s - a.s; });
-    return res;
-  }
-  function typeHint(qn){
-    if(/\b(vendor|vendors|supplier|suppliers|proveedor|proveedores)\b/.test(qn)) return 'vendor';
-    if(/\b(account|accounts|gl|gls|cuenta|cuentas)\b/.test(qn)) return 'gl';
-    if(/\b(category|categories|categoria|categorias|l2|bucket)\b/.test(qn)) return 'cat';
-    if(/\b(employee|empleado|who|quien|person|persona)\b/.test(qn)) return 'employee';
-    return null;
-  }
-  function typeLabel(E){ if(E.type === 'nvline') return E.it.nv ? 'No Vendor line item' : 'Line item · ' + E.it.v; return ({ cat:'Category (L2)', gl:'GL account', vendor:'Vendor', employee:'Employee', total:'Total' })[E.type] || ''; }
-
-  /* ---------------- parsing: period, benchmark, direction ---------------- */
-  function parsePeriod(qn){
-    if(/\b(ytd|year to date|a la fecha|acumulad[oa]|en lo que va|so far this year)\b/.test(qn)) return { t:'ytd' };
-    var m = qn.match(/\bq\s?([1-4])\b/);
-    if(m) return { t:'q', i:+m[1] - 1 };
-    var ORD = { first:0, primer:0, primero:0, '1st':0, second:1, segundo:1, '2nd':1, third:2, tercer:2, tercero:2, '3rd':2, fourth:3, cuarto:3, '4th':3 };
-    m = qn.match(/\b(first|second|third|fourth|1st|2nd|3rd|4th|primer|primero|segundo|tercer|tercero|cuarto)\s+(quarter|trimestre)\b/);
-    if(m) return { t:'q', i:ORD[m[1]] };
-    if(/\b(last|previous|prior)\s+quarter\b|\btrimestre (pasado|anterior)\b/.test(qn)) return { t:'q', i:Math.max(0, RQ - 1) };
-    if(/\bnext quarter\b|\bproximo trimestre\b|\bsiguiente trimestre\b/.test(qn)) return { t:'q', i:Math.min(3, RQ + 1) };
-    if(/\b(last|previous|prior)\s+month\b|\bmes (pasado|anterior)\b/.test(qn)) return { t:'m', i:Math.max(0, RM - 1) };
-    var toks = qn.split(' ');
-    for(var i = 0; i < toks.length; i++){
-      if(MONTHWORDS.hasOwnProperty(toks[i])){
-        if(toks[i] === 'may' && i + 1 < toks.length && /^(be|have|need|want|i|we)$/.test(toks[i+1])) continue;
-        return { t:'m', i:fiscalOf(MONTHWORDS[toks[i]]) };
-      }
-    }
-    if(/\b(this|current|el|este)\s+(month|mes)\b|\bmtd\b|\bmes actual\b|\bmonth\b|\bmes\b/.test(qn)) return { t:'m', i:RM };
-    if(/\b(this|current|este)\s+(quarter|trimestre)\b|\bqtd\b|\bquarter\b|\btrimestre\b|\bquarterly\b|\btrimestral\b/.test(qn)) return { t:'q', i:RQ };
-    if(/\b(full year|fy\s?\d*|annual|year|anual|ano|whole year|todo el ano|ano completo|fiscal year)\b/.test(qn)) return { t:'fy' };
-    return null;
-  }
-  function parseBk(qn){
-    var f = /\b(forecast|fcst|fc|6\+6|pronostico|proyeccion|reforecast|rf|outlook)\b/.test(qn);
-    var p = /\b(plan|budget|presupuesto|aop|planned|presupuestado|budgeted)\b/.test(qn);
-    return f && p ? 'both' : f ? 'f' : p ? 'p' : null;
-  }
-  function parseDir(qn){
-    if(/unfav|desfavorab|over ?spend|over budget|over plan|overrun|above (plan|budget|forecast)|sobregir|exceso|excedid|por encima|worst|peor|peores|overspent|over-spent|\bover\b/.test(qn)) return 'unfav';
-    if(/(^|\s)fav\b|(^|\s)favorab|saving|ahorro|under ?spend|under budget|under plan|below (plan|budget|forecast)|por debajo|\bbest\b|mejor|mejores|underspent|\bunder\b/.test(qn)) return 'fav';
-    return null;
-  }
-  function parseN(qn){
-    var m = qn.match(/\btop\s*(\d{1,2})\b/) || qn.match(/\b(\d{1,2})\s+(biggest|largest|top|main|principales|mayores|vendors|proveedores|accounts|cuentas|categories|categorias)\b/);
-    var n = m ? +m[1] : 5;
-    return Math.max(1, Math.min(n, 15));
-  }
-  function parseDim(qn){
-    if(/\b(vendor|vendors|supplier|suppliers|proveedor|proveedores)\b/.test(qn)) return 'vendor';
-    if(/\b(account|accounts|gl|gls|cuenta|cuentas)\b/.test(qn)) return 'gl';
-    if(/\b(category|categories|categoria|categorias|l2|bucket|buckets)\b/.test(qn)) return 'cat';
-    return null;
-  }
-
-  /* ---------------- board notes (comments typed on the board) ---------------- */
-  var SEC = {
-    'sec-qplan': QL[RQ] + ' vs Plan', 'sec-qfcst': QL[RQ] + ' vs Forecast',
-    'sec-fyplan': 'Full year vs Plan', 'sec-fyfcst': 'Full year vs Forecast', 'sec-hc': 'Headcount', 'sec-nv': 'No Vendor detail'
-  };
-  var AUTO = /Validate timing, scope, and whether the run-rate|Variance appears pooled inside unattributed detail rows|^Open req not filled yet|^TBH line is now flowing|^Working cost is showing without plan budget|^Working is (below|above) plan, likely driven|^No material variance versus plan/;
-  function isHidden(el){ return !!(el && el.closest && el.closest('.hidden')); }
-  function boardNotes(){
-    var out = [];
-    d.querySelectorAll('.drv-block').forEach(function(blk){
-      if(isHidden(blk)) return;
-      var sec = blk.closest('section'), sid = sec ? sec.id : '';
-      var lab = blk.querySelector('.drv-label'); lab = lab ? lab.textContent.trim() : '';
-      blk.querySelectorAll('textarea').forEach(function(t){
-        var row = t.closest('.vrow, .comment-row');
-        if(row && isHidden(row)) return;
-        var txt = String(t.value || t.textContent || '').trim();
-        if(!txt || AUTO.test(txt)) return;
-        var p = row ? row.querySelector('p') : null;
-        out.push({ sid:sid, label:lab, who:p ? p.textContent.trim() : '', text:txt });
-      });
-    });
-    d.querySelectorAll('[data-comment-block]').forEach(function(box){
-      if(isHidden(box)) return;
-      var sec = box.closest('section'), sid = sec ? sec.id : '';
-      box.querySelectorAll('textarea').forEach(function(t){
-        var row = t.closest('.comment-row'); if(row && isHidden(row)) return;
-        var txt = String(t.value || t.textContent || '').trim();
-        if(txt) out.push({ sid:sid, label:'', who:'', text:txt });
-      });
-    });
-    d.querySelectorAll('.nv-gl').forEach(function(card){
-      if(isHidden(card)) return;
-      var t = card.querySelector('textarea');
-      var txt = t ? String(t.value || t.textContent || '').trim() : '';
-      if(txt) out.push({ sid:'sec-nv', label:'', who:card.getAttribute('data-gl-label') || '', text:txt });
-    });
-    d.querySelectorAll('.hcrow').forEach(function(row){
-      if(isHidden(row)) return;
-      var t = row.querySelector('textarea'), p = row.querySelector('p');
-      var txt = t ? String(t.value || t.textContent || '').trim() : '';
-      if(txt && !AUTO.test(txt)) out.push({ sid:'sec-hc', label:'', who:p ? p.textContent.trim() : '', text:txt });
-    });
-    return out;
-  }
-  function notesFor(E){
-    var nm = norm(E.name);
-    return boardNotes().filter(function(n){
-      var lab = norm(n.label), txt = norm(n.text), who = norm(n.who);
-      if(E.type === 'cat') return lab === nm;
-      if(E.type === 'total') return !n.label && !n.who && n.sid !== 'sec-hc';
-      if(E.type === 'vendor' || E.type === 'gl') return (who && who.indexOf(nm) >= 0) || (nm.length >= 4 && (' ' + txt + ' ').indexOf(' ' + nm + ' ') >= 0);
-      if(E.type === 'employee'){
-        if(who && who.indexOf(nm) >= 0) return true;
-        var parts = nm.split(' ').filter(function(p){ return p.length >= 3; });
-        return parts.length >= 2 && parts.every(function(p){ return (' ' + txt + ' ').indexOf(' ' + p + ' ') >= 0; });
-      }
-      return false;
-    });
-  }
-  function notesHtml(list){
-    if(!list.length) return '';
-    return '<div class="fb-sub">Analyst notes on the board</div>' + list.slice(0, 4).map(function(n){
-      return '<div class="fb-note"><span>' + esc(SEC[n.sid] || 'Board') + (n.label ? ' · ' + esc(n.label) : '') + (n.who && !/^no vendor/i.test(n.who) ? ' · ' + esc(n.who) : '') + '</span>' + esc(n.text) + '</div>';
-    }).join('');
-  }
-
-  /* ---------------- building blocks ---------------- */
-  function scaleOf(E){ return (E.type === 'vendor' || E.type === 'gl') ? 0.4 : 1; }
-  function glanceTable(E, hiP){
-    var Ps = [{ t:'m', i:RM }, { t:'q', i:RQ }, { t:'ytd' }, { t:'fy' }];
-    if(hiP && !Ps.some(function(P){ return samePeriod(P, hiP); })) Ps.unshift(hiP);
-    var sc = scaleOf(E);
-    var h = '<table class="fb-t fb-tw"><thead><tr><th></th><th>Working</th><th>Plan</th><th>vs Plan</th><th>vs FCST</th></tr></thead><tbody>';
-    Ps.forEach(function(P){
-      var x = ev(E, P, 'p'), t = thrOf(P, sc);
-      h += '<tr' + (samePeriod(P, hiP) ? ' class="fb-hl"' : '') + '><td>' + esc(pLabel(P)) + '</td><td>' + fm(x.w) + '</td><td>' + fm(x.p) + '</td><td>' + vspan(x.vp, t) + '</td><td>' + vspan(x.vf, t) + '</td></tr>';
-    });
-    return h + '</tbody></table>';
-  }
-  function headline(E, P, bk){
-    var x = ev(E, P, bk), t = thrOf(P, scaleOf(E)), nm = '<b>' + esc(E.name) + '</b>', pl = esc(pLabel(P)), bn = esc(bName(bk));
-    var tg = Math.abs(x.v) >= t ? ' ' + tag(x.v, t) : '.';
-    if(Math.abs(x.b) < 1 && Math.abs(x.w) >= 1) return nm + ' has <b>' + fm(x.w) + '</b> of Working in ' + pl + ' with <b>no ' + bn + '</b>: the full amount is unplanned' + tg;
-    if(Math.abs(x.w) < 1 && Math.abs(x.b) >= 1) return nm + ' shows <b>no Working spend</b> in ' + pl + ' against ' + fm(x.b) + ' of ' + bn + ', so that budget was not used' + tg;
-    if(Math.abs(x.w) < 1 && Math.abs(x.b) < 1) return nm + ' has no Working or ' + bn + ' in ' + pl + '.';
-    var dir = Math.abs(x.v) < t ? 'tracking close to' : (x.v > 0 ? 'running over' : 'running under');
-    return nm + ' is ' + dir + ' ' + bn + ' in ' + pl + ': Working <b>' + fm(x.w) + '</b> vs ' + fm(x.b) + ' → <b>' + vspan(x.v, t) + '</b>' + (pct(x.v, x.b) ? ' (' + pct(x.v, x.b) + ')' : '') + ' ' + tag(x.v, t);
-  }
-  function kids(E, P, bk){
-    var out = [];
-    function push(name, sub, rows, ref){ var x = withB(sumVals(rows, P), bk); out.push({ name:name, sub:sub, v:x, E:ref || null }); }
-    if(E.type === 'total') CATS.forEach(function(c){ push(c.name, '', c.rows, c); });
-    else if(E.type === 'cat') E.gls.forEach(function(g){ push(g.name, g.code, g.rows, g); });
-    else if(E.type === 'gl') E.vrows.forEach(function(r){ var sc = splitCode(r.l); push(r.t === 'novendor' ? 'No Vendor' : sc.name, sc.code, [r]); });
-    else if(E.type === 'vendor') E.pairs.forEach(function(p){ push(p.gl.name, p.gl.code + (p.gl.cat ? ' · ' + p.gl.cat.name : ''), [p.row], p.gl); });
-    return out.filter(function(k){ return Math.abs(k.v.w) >= 1 || Math.abs(k.v.b) >= 1; })
-      .sort(function(a, b){ return Math.abs(b.v.v) - Math.abs(a.v.v); });
-  }
-  function vendorsIn(E, P, bk){
-    var map = {}, order = [];
-    VROWS.forEach(function(x){
-      if(E && E.type === 'cat' && x.cat !== E) return;
-      if(E && E.type === 'gl' && x.gl !== E) return;
-      var k = x.vendor.key;
-      if(!map[k]){ map[k] = { E:x.vendor, rows:[] }; order.push(k); }
-      map[k].rows.push(x.row);
-    });
-    return order.map(function(k){ var m = map[k]; return { E:m.E, name:m.E.name, nov:m.E.nov, v:withB(sumVals(m.rows, P), bk) }; })
-      .filter(function(k){ return Math.abs(k.v.w) >= 1 || Math.abs(k.v.b) >= 1; });
-  }
-  function kidTable(list, n, P, bk, scale){
-    if(!list.length) return '';
-    var t = thrOf(P, scale || 0.4);
-    var h = '<table class="fb-t"><thead><tr><th></th><th>Working</th><th>' + (bk === 'f' ? 'FCST' : 'Plan') + '</th><th>Var</th></tr></thead><tbody>';
-    list.slice(0, n).forEach(function(k){
-      h += '<tr><td>' + esc(k.name) + (k.sub ? '<small>' + esc(k.sub) + '</small>' : '') + '</td><td>' + fm(k.v.w) + '</td><td>' + fm(k.v.b) + '</td><td>' + vspan(k.v.v, t) + '</td></tr>';
-    });
-    if(list.length > n) h += '<tr class="fb-more"><td colspan="4">+ ' + (list.length - n) + ' more</td></tr>';
-    return h + '</tbody></table>';
-  }
-  function driverSentence(list, t){
-    var up = list.filter(function(k){ return k.v.v >= t; }).sort(function(a, b){ return b.v.v - a.v.v; }).slice(0, 3);
-    var dn = list.filter(function(k){ return k.v.v <= -t; }).sort(function(a, b){ return a.v.v - b.v.v; }).slice(0, 3);
-    function nm(k){ return esc(k.name) + ' (' + vspan(k.v.v, t) + ')'; }
-    if(!up.length && !dn.length){
-      var mu = list.filter(function(k){ return k.v.v >= t * 0.2; }).sort(function(a, b){ return b.v.v - a.v.v; }).slice(0, 2);
-      var md = list.filter(function(k){ return k.v.v <= -t * 0.2; }).sort(function(a, b){ return a.v.v - b.v.v; }).slice(0, 2);
-      if(!mu.length && !md.length) return 'No line crosses the ±' + fm(t) + ' materiality threshold; the variance is spread across many small items.';
-      var parts = [];
-      if(mu.length) parts.push(mu.map(nm).join(', '));
-      if(md.length) parts.push((mu.length ? 'offset by ' : '') + md.map(nm).join(', '));
-      return 'Nothing crosses the ±' + fm(t) + ' materiality threshold. Largest moves: ' + parts.join(' ') + '.';
-    }
-    var s = [];
-    if(up.length) s.push('Overspend in ' + up.map(nm).join(', '));
-    if(dn.length) s.push((up.length ? 'offset by savings in ' : 'Savings in ') + dn.map(nm).join(', '));
-    return s.join(', ') + '.';
-  }
-  function chipsFor(list){ return list.filter(Boolean).slice(0, 4); }
-
-  /* ---------------- real vs projected & buffer ----------------
-     Working = actuals through the review month + projection after it.
-     Buffer  = "No Vendor" lines outside Comp & Benefits, in months after the review month:
-               above Plan  -> savings reallocated (parked) into future months;
-               below Plan  -> buffer released to fund overspends.                        */
-  function isCB(c){ return !!(c && /comp(ensation)?\s*(and|&)\s*ben/i.test(c.name)); }
-  function monthsOf(P){
-    var a = [], k;
-    if(P.t === 'm') return [P.i];
-    if(P.t === 'q') return [P.i * 3, P.i * 3 + 1, P.i * 3 + 2];
-    if(P.t === 'ytd'){ for(k = 0; k <= RM; k++) a.push(k); return a; }
-    for(k = 0; k < 12; k++) a.push(k); return a;
-  }
-  function hasFuture(P){ return monthsOf(P).some(function(m){ return m > RM; }); }
-  function closedLabel(P){
-    var c = monthsOf(P).filter(function(m){ return m <= RM; });
-    if(!c.length) return null;
-    return c.length === 1 ? MONTHS[c[0]] : MONTHS[c[0]] + ' – ' + MONTHS[c[c.length - 1]];
-  }
-  function projLabel(P){
-    var f = monthsOf(P).filter(function(m){ return m > RM; });
-    if(!f.length) return null;
-    return f.length === 1 ? MONTHS[f[0]] : MONTHS[f[0]] + ' – ' + MONTHS[f[f.length - 1]];
-  }
-  function decompose(scope, P, bk){
-    var o = { closed:0, parked:0, funding:0, cb:0, other:0, total:0, parkedL:[], fundL:[], overL:[], otherL:[] };
-    VROWS.forEach(function(x){
-      if(scope && scope.type === 'cat' && x.cat !== scope) return;
-      if(scope && scope.type === 'gl' && x.gl !== scope) return;
-      if(scope && scope.type === 'vendor' && x.vendor !== scope) return;
-      monthsOf(P).forEach(function(m){
-        var a = x.row.M && x.row.M[m]; if(!a) return;
-        var dd = a[0] - (bk === 'f' ? a[2] : a[1]);
-        if(Math.abs(dd) < 0.5) return;
-        o.total += dd;
-        if(m <= RM){ o.closed += dd; return; }
-        if(x.vendor.nov && !isCB(x.cat)){
-          if(dd > 0){ o.parked += dd; o.parkedL.push({ m:m, gl:x.gl, d:dd }); }
-          else { o.funding += dd; o.fundL.push({ m:m, gl:x.gl, d:dd }); }
-        } else if(isCB(x.cat)) o.cb += dd;
-        else { o.other += dd; o.otherL.push({ m:m, x:x, d:dd }); if(dd > 0) o.overL.push({ m:m, x:x, d:dd }); }
-      });
-    });
-    o.buffer = o.parked + o.funding; o.excl = o.total - o.buffer;
-    return o;
-  }
-  function nspan(v){ return '<span class="fb-neu">' + fv(v) + '</span>'; }
-  function monthList(list){
-    var seen = {}, ms = [];
-    list.forEach(function(e){ if(!seen[e.m]){ seen[e.m] = 1; ms.push(e.m); } });
-    return ms.sort(function(a, b){ return a - b; }).map(function(m){ return MONTHS[m]; }).join(', ');
-  }
-  function topNames(list, n){
-    var agg = {}, order = [];
-    list.forEach(function(e){ var k = e.x.vendor.nov ? e.x.gl.name : e.x.vendor.name; if(!(k in agg)){ agg[k] = 0; order.push(k); } agg[k] += e.d; });
-    return order.map(function(k){ return { k:k, d:agg[k] }; }).filter(function(r){ return Math.abs(r.d) >= 0.5; })
-      .sort(function(a, b){ return Math.abs(b.d) - Math.abs(a.d); }).slice(0, n)
-      .map(function(r){ return r.k + ' ' + fv(r.d); }).join(', ');
-  }
-  // Bridge: closed-month actuals -> buffer moves -> projected changes = reported variance.
-  function decompTable(o, P, bk, scope){
-    var t = thrOf(P, scope && scope.type !== 'total' ? 0.4 : 1), cl = closedLabel(P), pj = projLabel(P), bn = bk === 'f' ? 'Forecast' : 'Plan';
-    var rows = [];
-    if(cl) rows.push([cl + ' actual ' + (o.closed <= 0 ? 'savings' : 'overspend'), 'Real spend vs ' + bn + ' in closed months', o.closed]);
-    if(pj){
-      if(o.parked >= 0.5){ var pn = nvNamesList(o.parkedL, bk, 1); rows.push(['Savings moved to buffer (' + monthList(o.parkedL) + ')', 'Re-budgeted into future months · not spend' + (pn.length ? ' · line items: ' + pn.slice(0, 2).join(', ') + (pn.length > 2 ? ', …' : '') : ''), o.parked, 1]); }
-      if(o.funding <= -0.5){
-        var cov = topNames(o.overL.filter(function(x){ return o.fundL.some(function(f){ return f.m === x.m; }); }), 2);
-        rows.push(['Buffer used to cover overspends (' + monthList(o.fundL) + ')', cov ? 'Covers ' + cov + ' (same month)' : 'Released to fund overspends', o.funding, 1]);
-      }
-      if(Math.abs(o.cb) >= 0.5) rows.push([(o.cb > 0 ? 'Higher' : 'Lower') + ' payroll projected (' + pj + ')', 'Comp & Benefits', o.cb]);
-      if(Math.abs(o.other) >= 0.5){ var tn = topNames(o.otherL, 2); rows.push(['Other projected spend changes (' + pj + ')', tn ? 'Mostly ' + tn : '', o.other]); }
-    }
-    var h = '<table class="fb-t fb-bridge"><thead><tr><th></th><th>vs ' + bn + '</th></tr></thead><tbody>';
-    rows.forEach(function(r){ h += '<tr' + (r[3] ? ' class="fb-bufrow"' : '') + '><td>' + esc(r[0]) + (r[1] ? '<small>' + esc(r[1]) + '</small>' : '') + '</td><td>' + (r[3] ? nspan(r[2]) : vspan(r[2], t)) + '</td></tr>'; });
-    h += '<tr class="fb-tot"><td>Reported variance vs ' + bn + '</td><td>' + vspan(o.total, t) + '</td></tr>';
-    if(pj && Math.abs(o.buffer) >= 0.5) h += '<tr class="fb-hl"><td>Underlying result without buffer moves</td><td>' + vspan(o.excl, t) + '</td></tr>';
-    return h + '</tbody></table>';
-  }
-  // Conclusion first, then how it builds up.
-  function bufferSentence(o, P, bk, who){
-    if(!hasFuture(P) || Math.abs(o.buffer) < 0.5) return '';
-    var t = thrOf(P), bn = esc(bName(bk)), pl = esc(pLabel(P));
-    var look = Math.abs(o.total) < t ? 'looks in line with ' + bn + ' (' + vspan(o.total, t) + ')' : 'shows ' + vspan(o.total, t) + ' ' + (o.total > 0 ? 'over' : 'under') + ' ' + bn;
-    var link = verdict(o.total, t) !== verdict(o.excl, t) ? ', but without buffer moves ' : '; without buffer moves ';
-    var s = '<b>' + pl + ' ' + look + link + esc(who) + ' is ' + vspan(o.excl, t) + ' ' + verdict(o.excl, t) + '.</b> ';
-    var parts = [], cl = closedLabel(P), proj = o.cb + o.other;
-    if(cl) parts.push(esc(cl) + ' actuals came in ' + vspan(o.closed, t) + ' vs ' + bn);
-    if(o.parked >= 0.5) parts.push(fm(o.parked) + ' of savings were moved into the buffer (' + esc(monthList(o.parkedL)) + '), which is not spend');
-    if(o.funding <= -0.5) parts.push(fm(-o.funding) + ' of buffer was used to cover overspends');
-    if(Math.abs(proj) >= 0.5) parts.push('projected spend changes ' + (proj > 0 ? 'add ' + fm(proj) : 'save ' + fm(-proj)));
-    if(parts.length){ var j = parts.join('; '); s += j.charAt(0).toUpperCase() + j.slice(1) + '.'; }
-    return s;
-  }
-
-  /* ---------------- answers ---------------- */
-  function aHelp(){
-    return {
-      html: '<p>I answer from this board\'s feeds only (no AI model, nothing leaves your browser). I understand English and Spanish; I answer in English.</p>'
-        + '<div class="fb-sub">Things you can ask</div><ul class="fb-ul">'
-        + '<li><b>Overall:</b> "Executive summary", "How are we doing vs plan this quarter?"</li>'
-        + '<li><b>Any category, account or vendor:</b> "Zoom vs plan", "What happened with Consulting in Q2?", "670800 YTD"</li>'
-        + '<li><b>Compare:</b> "Zoom vs Microsoft", "Compare CDW and Anthropic full year"</li>'
-        + '<li><b>Rankings:</b> "Top 5 unfavorable vendors", "Biggest savings by account full year vs forecast"</li>'
-        + '<li><b>Exceptions:</b> "What is not in plan?", "Budget with no spend YTD"</li>'
-        + '<li><b>Pacing:</b> "Budget utilization", "Monthly trend for Software"</li>'
-        + '<li><b>Buffer:</b> "Real vs projected", "Where are the savings parked?", "Software excluding buffer"</li>'
-        + (NV ? '<li><b>No Vendor detail:</b> "No Vendor line items", "No Vendor in Consulting", or the name of a line item</li>' : '')
-        + '<li><b>People & T&E:</b> "Headcount", "Open TBH roles", "T&E by employee", "Jorge Herrera"</li>'
-        + '<li><b>Board items:</b> "Open actions"</li></ul>'
-        + '<p class="fb-dim">Defaults: current quarter (' + esc(QL[RQ]) + ') and ' + esc(PLAN) + ' unless you name a month, quarter, YTD, full year or Forecast.</p>',
-      chips: ['Executive summary', 'Top 5 unfavorable vendors this quarter', 'What is not in plan YTD?', 'Budget utilization']
-    };
-  }
-
-  function aSummary(){
-    var Ps = [{ t:'m', i:RM }, { t:'q', i:RQ }, { t:'ytd' }, { t:'fy' }];
-    var tbl = '<table class="fb-t"><thead><tr><th></th><th>Working</th><th>vs Plan</th><th>vs FCST</th></tr></thead><tbody>';
-    Ps.forEach(function(P){ var x = ev(TOTAL, P, 'p'), t = thrOf(P); tbl += '<tr><td>' + esc(pLabel(P)) + '</td><td>' + fm(x.w) + '</td><td>' + vspan(x.vp, t) + '</td><td>' + vspan(x.vf, t) + '</td></tr>'; });
-    tbl += '</tbody></table>';
-    var Pq = { t:'q', i:RQ }, Pf = { t:'fy' };
-    var q = ev(TOTAL, Pq, 'p'), fy = ev(TOTAL, Pf, 'p'), fyf = ev(TOTAL, Pf, 'f');
-    function vs(x, t, lbl){
-      if(Math.abs(x.v) < t) return 'in line with ' + esc(lbl) + ' (' + vspan(x.v, t) + ')';
-      return vspan(x.v, t) + (pct(x.v, x.b) ? ' (' + pct(x.v, x.b) + ')' : '') + ' ' + (x.v > 0 ? 'over' : 'under') + ' ' + esc(lbl) + ' ' + tag(x.v, t);
-    }
-    var h = '<p><b>' + esc(BU) + ' · ' + esc(META.month || '') + ' ' + esc(FY) + '.</b> ' + esc(QL[RQ]) + ' Working is <b>' + fm(q.w) + '</b>, ' + vs(q, THR.q, PLAN)
-      + '. Full year is <b>' + fm(fy.w) + '</b>, ' + vs(fy, THR.fy, PLAN) + ', and ' + vs(fyf, THR.fy, FCST) + '.</p>';
-    var ofy = decompose(null, Pf, 'p');
-    if(Math.abs(ofy.buffer) >= 0.5){
-      h += '<p>' + bufferSentence(ofy, Pf, 'p', BU) + '</p>';
-    }
-    h += tbl;
-    h += '<div class="fb-sub">What drives ' + esc(QL[RQ]) + ' vs Plan</div><p>' + driverSentence(kids(TOTAL, Pq, 'p'), THR.q) + '</p>';
-    h += '<div class="fb-sub">What drives the full year vs Plan</div><p>' + driverSentence(kids(TOTAL, Pf, 'p'), THR.fy) + '</p>';
-    var vq = vendorsIn(null, Pq, 'p').filter(function(k){ return !k.nov; }).sort(function(a, b){ return b.v.v - a.v.v; });
-    var watch = [];
-    if(vq[0] && vq[0].v.v >= THR.q * 0.4) watch.push('Largest vendor overspend this quarter: <b>' + esc(vq[0].name) + '</b> ' + vspan(vq[0].v.v, 1) + '.');
-    var unpl = VROWS.map(function(x){ return withB(rowVal(x.row, { t:'ytd' }), 'p'); }).filter(function(x){ return Math.abs(x.p) < 1 && Math.abs(x.w) >= 1; });
-    if(unpl.length) watch.push('Unplanned spend YTD: <b>' + fm(unpl.reduce(function(s, x){ return s + x.w; }, 0)) + '</b> across ' + unpl.length + ' vendor/account lines with no Plan.');
-    if(HC && HC.salary){ var hv = HC.salary.workTotal - HC.salary.planTotal; watch.push('Salary Accrued (HC feed) full year: ' + fm(HC.salary.workTotal) + ' vs ' + fm(HC.salary.planTotal) + ' Plan → ' + vspan(hv, THR.q) + '.'); }
-    if(watch.length) h += '<div class="fb-sub">Watch items</div><ul class="fb-ul">' + watch.map(function(w){ return '<li>' + w + '</li>'; }).join('') + '</ul>';
-    var notes = boardNotes().filter(function(n){ return n.label && n.sid !== 'sec-hc'; }).concat(notesFor(TOTAL));
-    h += notesHtml(notes);
-    return { html:h, chips:['Real vs projected full year', 'Top 5 unfavorable vendors this quarter', 'Full year vs forecast', 'What is not in plan YTD?'] };
-  }
-
-  function aBuffer(scope, P, bk){
-    bk = bk === 'both' ? 'p' : (bk || 'p');
-    var who = scope ? scope.name : BU;
-    var h = '<div class="fb-h">Real vs projected · ' + esc(who) + ' <small>' + esc(pLabel(P)) + ' vs ' + esc(bName(bk)) + '</small></div>';
-    if(!hasFuture(P)){
-      var oc = decompose(scope, P, bk);
-      h += '<p>All months in ' + esc(pLabel(P)) + ' are closed, so the whole variance (' + vspan(oc.total, thrOf(P)) + ') is real. Buffer only exists in months after ' + esc(MONTHS[RM]) + '.</p>';
-      return { html:h, chips:['Real vs projected full year', 'Real vs projected ' + QL[RQ]] };
-    }
-    var o = decompose(scope, P, bk);
-    var line = bufferSentence(o, P, bk, who);
-    h += '<p>' + (line || 'There are no buffer moves in ' + esc(pLabel(P)) + ', so the reported variance (' + vspan(o.total, thrOf(P)) + ') is the underlying result.') + '</p>';
-    h += '<div class="fb-sub">How the variance builds up</div>' + decompTable(o, P, bk, scope);
-    h += '<p class="fb-dim">How to read it: Working = actuals through ' + esc(MONTHS[RM]) + ' + projection after. Buffer moves only shift savings between months ("No Vendor" lines outside Comp &amp; Benefits); they are not spend.</p>';
-    if(!scope){
-      var rows = CATS.map(function(c){ var x = decompose(c, P, bk); return { n:c.name, o:x }; }).filter(function(r){ return Math.abs(r.o.total) >= 0.5; })
-        .sort(function(a, b){ return Math.abs(b.o.total) - Math.abs(a.o.total); });
-      var t = thrOf(P, 0.4);
-      h += '<div class="fb-sub">By category</div><table class="fb-t fb-tw"><thead><tr><th></th><th>Actual</th><th>Buffer moves</th><th>Projection</th><th>Without buffer</th></tr></thead><tbody>';
-      rows.forEach(function(r){ h += '<tr><td>' + esc(r.n) + '</td><td>' + vspan(r.o.closed, t) + '</td><td>' + nspan(r.o.buffer) + '</td><td>' + vspan(r.o.cb + r.o.other, t) + '</td><td>' + vspan(r.o.excl, t) + '</td></tr>'; });
-      h += '</tbody></table>';
-    }
-    function grp(list){
-      var m = {}, order = [];
-      list.forEach(function(e){ var k = e.gl.key + '|' + e.m; if(!m[k]){ m[k] = { gl:e.gl, m:e.m, d:0 }; order.push(k); } m[k].d += e.d; });
-      return order.map(function(k){ return m[k]; });
-    }
-    var pk = grp(o.parkedL).sort(function(a, b){ return b.d - a.d; });
-    if(pk.length){
-      h += '<div class="fb-sub">Savings moved to buffer</div><table class="fb-t"><tbody>';
-      pk.slice(0, 6).forEach(function(e){ var nn = nvNames(e.gl.code, e.m, bk, 1); h += '<tr><td>' + esc(e.gl.code + ' ' + e.gl.name) + '<small>' + esc(MONTHS[e.m]) + (nn.length ? ' · ' + esc(nn.slice(0, 2).join(', ')) : '') + '</small></td><td>' + nspan(e.d) + '</td></tr>'; });
-      if(pk.length > 6) h += '<tr class="fb-more"><td colspan="2">+ ' + (pk.length - 6) + ' more</td></tr>';
-      h += '</tbody></table>';
-    }
-    var fd = grp(o.fundL).sort(function(a, b){ return a.d - b.d; });
-    if(fd.length){
-      h += '<div class="fb-sub">Buffer used to cover overspends</div><table class="fb-t"><tbody>';
-      fd.slice(0, 5).forEach(function(e){
-        var same = o.overL.filter(function(x){ return x.m === e.m; }).sort(function(a, b){ return b.d - a.d; }).slice(0, 2);
-        var fn = nvNames(e.gl.code, e.m, bk, -1);
-        h += '<tr><td>' + esc(e.gl.code + ' ' + e.gl.name) + '<small>' + esc(MONTHS[e.m]) + (fn.length ? ' · ' + esc(fn.slice(0, 2).join(', ')) : '') + (same.length ? ' · covers ' + same.map(function(x){ return esc(x.x.vendor.name) + ' ' + fv(x.d); }).join(', ') : '') + '</small></td><td>' + nspan(e.d) + '</td></tr>';
-      });
-      h += '</tbody></table>';
-    }
-    if(NV) h += '<p class="fb-dim">Line item names come from the No Vendor feed. Ask "No Vendor line items" for the full list.</p>';
-    return { html:h, chips:chipsFor([
-      P.t === 'fy' ? 'Real vs projected ' + QL[RQ] : 'Real vs projected full year',
-      'Real vs projected vs ' + (bk === 'p' ? 'forecast' : 'plan'),
-      'Budget utilization',
-      scope ? 'Real vs projected full year' : 'Executive summary'
-    ]) };
-  }
-
-  function aTotal(P, bk){
-    var bks = bk === 'both' ? ['p','f'] : [bk || 'p'];
-    var bk0 = bks[0], t = thrOf(P);
-    var od = hasFuture(P) ? decompose(null, P, bk0) : null, bs = od ? bufferSentence(od, P, bk0, BU) : '';
-    // With buffer moves, the conclusion replaces the generic headline for the main benchmark.
-    var h = bks.map(function(b, i){ return '<p>' + (i === 0 && bs ? bs : headline(TOTAL, P, b)) + '</p>'; }).join('');
-    if(od){
-      h += '<div class="fb-sub">How the variance builds up</div>' + decompTable(od, P, bk0, null);
-    }
-    var cats = kids(TOTAL, P, bk0);
-    h += '<div class="fb-sub">By category · ' + esc(pLabel(P)) + ' vs ' + esc(bName(bk0)) + '</div><p>' + driverSentence(cats, t) + '</p>' + kidTable(cats, 8, P, bk0, 1);
-    var vs = vendorsIn(null, P, bk0).filter(function(k){ return !k.nov; }).sort(function(a, b){ return Math.abs(b.v.v) - Math.abs(a.v.v); });
-    if(vs.length) h += '<div class="fb-sub">Largest vendor variances</div>' + kidTable(vs, 5, P, bk0);
-    return { html:h, chips:chipsFor([bk0 === 'p' ? 'Same vs forecast' : 'Same vs plan', P.t !== 'fy' ? 'Full year vs plan' : 'This quarter vs plan', 'Top 5 unfavorable vendors ' + pLabel(P), hasFuture(P) ? 'Where are the savings parked?' : 'Monthly trend']) };
-  }
-
-  function aEntity(E, P, bk, why){
-    var bks = bk === 'both' ? ['p','f'] : [bk || 'p'], bk0 = bks[0];
-    var h = '<div class="fb-h">' + esc(E.name) + ' <small>' + esc(typeLabel(E)) + (E.code ? ' · ' + esc(E.code) : '') + '</small></div>';
-    h += bks.map(function(b){ return '<p>' + headline(E, P, b) + '</p>'; }).join('');
-    var x = ev(E, P, bk0), t = thrOf(P, scaleOf(E));
-    if(E.type === 'vendor'){
-      var where = E.pairs.map(function(p){ return esc(p.gl.code + ' ' + p.gl.name) + (p.gl.cat ? ' <span class="fb-dim">(' + esc(p.gl.cat.name) + ')</span>' : ''); });
-      h += '<p class="fb-dim">Booked to: ' + where.join('; ') + '</p>';
-    } else if(E.type === 'gl' && E.cat){
-      h += '<p class="fb-dim">Part of category ' + esc(E.cat.name) + '.</p>';
-    } else if(E.type === 'cat'){
-      var tv = ev(TOTAL, P, bk0).v;
-      if(Math.abs(tv) >= 1) h += '<p class="fb-dim">Net ' + esc(pLabel(P)) + ' variance for ' + esc(BU) + ' is ' + vspan(tv, thrOf(P)) + '; this category contributes ' + vspan(x.v, t) + '.</p>';
-    }
-    if((E.type === 'cat' || E.type === 'gl' || (E.type === 'vendor' && E.nov)) && hasFuture(P)){
-      var oe = decompose(E, P, bk0);
-      var be = bufferSentence(oe, P, bk0, E.name);
-      if(be) h += '<p>' + be + '</p>';
-    }
-    h += glanceTable(E, P);
-    if(E.type === 'cat'){
-      var g = kids(E, P, bk0);
-      if(g.length) h += '<div class="fb-sub">' + (why ? 'What explains it · ' : '') + 'By account · ' + esc(pLabel(P)) + '</div>' + kidTable(g, 6, P, bk0);
-      var vs = vendorsIn(E, P, bk0).filter(function(k){ return !k.nov; }).sort(function(a, b){ return Math.abs(b.v.v) - Math.abs(a.v.v); });
-      if(vs.length) h += '<div class="fb-sub">Top vendors</div>' + kidTable(vs, 5, P, bk0);
-      var nv = vendorsIn(E, P, bk0).filter(function(k){ return k.nov; })[0];
-      if(nv && Math.abs(nv.v.v) >= 1) h += '<p class="fb-dim">"No Vendor" lines in this category: ' + fm(nv.v.w) + ' Working vs ' + fm(nv.v.b) + ' → ' + vspan(nv.v.v, t) + '.</p>';
-    } else if(E.type === 'gl'){
-      var gv = kids(E, P, bk0);
-      if(gv.length) h += '<div class="fb-sub">By vendor · ' + esc(pLabel(P)) + '</div>' + kidTable(gv, 6, P, bk0);
-      var ng = nvG(E.code);
-      if(ng) h += nvBlock(ng, P, bk0, false);
-    } else if(E.type === 'vendor' && E.pairs.length > 1){
-      h += '<div class="fb-sub">By account · ' + esc(pLabel(P)) + '</div>' + kidTable(kids(E, P, bk0), 6, P, bk0);
-    }
-    var notes = notesFor(E);
-    h += notesHtml(notes);
-    if(why && !notes.length) h += '<p class="fb-dim">No analyst comment on the board mentions ' + esc(E.name) + ' yet. The numbers above are the quantitative driver; add a comment in the driver block to capture the business reason.</p>';
-    var chips = [
-      E.name + ' vs ' + (bk0 === 'p' ? 'forecast' : 'plan'),
-      P.t === 'fy' ? E.name + ' ' + QL[RQ] : E.name + ' full year',
-      'Monthly trend for ' + E.name,
-      E.type === 'cat' ? 'Top vendors in ' + E.name : (E.type === 'vendor' && E.pairs[0] && E.pairs[0].gl.cat ? E.pairs[0].gl.cat.name + ' vs plan' : null)
-    ];
-    return { html:h, chips:chipsFor(chips) };
-  }
-
-  function aTop(P, bk, dim, dir, n, scope){
-    bk = bk === 'both' ? 'p' : (bk || 'p');
-    dim = dim || (scope ? 'vendor' : 'cat');
-    var list, dimLabel;
-    if(dim === 'vendor'){ list = vendorsIn(scope, P, bk).filter(function(k){ return !k.nov; }); dimLabel = 'vendors'; }
-    else if(dim === 'gl'){ list = GLS.filter(function(g){ return !scope || (scope.type === 'cat' && g.cat === scope) || g === scope; }).map(function(g){ return { name:g.name, sub:g.code + (g.cat ? ' · ' + g.cat.name : ''), v:ev(g, P, bk), E:g }; }); dimLabel = 'accounts'; }
-    else { list = CATS.map(function(c){ return { name:c.name, v:ev(c, P, bk), E:c }; }); dimLabel = 'categories'; }
-    list = list.filter(function(k){ return Math.abs(k.v.w) >= 1 || Math.abs(k.v.b) >= 1; });
-    if(!list.length && dim === 'vendor' && scope && scope.type === 'cat') return aTop(P, bk, 'gl', dir, n, scope);
-    if(dir === 'unfav') list = list.filter(function(k){ return k.v.v > 0.5; }).sort(function(a, b){ return b.v.v - a.v.v; });
-    else if(dir === 'fav') list = list.filter(function(k){ return k.v.v < -0.5; }).sort(function(a, b){ return a.v.v - b.v.v; });
-    else list = list.filter(function(k){ return Math.abs(k.v.v) >= 0.5; }).sort(function(a, b){ return Math.abs(b.v.v) - Math.abs(a.v.v); });
-    var dirLabel = dir === 'unfav' ? 'unfavorable ' : dir === 'fav' ? 'favorable ' : '';
-    var title = 'Top ' + Math.min(n, list.length) + ' ' + dirLabel + dimLabel + (scope ? ' in ' + scope.name : '') + ' · ' + pLabel(P) + ' vs ' + bName(bk);
-    if(!list.length) return { html:'<p>No ' + dirLabel + dimLabel + (scope ? ' in ' + esc(scope.name) : '') + ' with a variance in ' + esc(pLabel(P)) + ' vs ' + esc(bName(bk)) + '.</p>', chips:['Executive summary'] };
-    var shown = list.slice(0, n), sum = shown.reduce(function(s, k){ return s + k.v.v; }, 0);
-    var net = scope ? ev(scope, P, bk).v : ev(TOTAL, P, bk).v;
-    var h = '<div class="fb-h">' + esc(title) + '</div>' + kidTable(list, n, P, bk, dim === 'cat' ? 1 : 0.4);
-    h += '<p>Together these are ' + vspan(sum, 1) + '; the net ' + esc(pLabel(P)) + ' variance' + (scope ? ' for ' + esc(scope.name) : ' for ' + esc(BU)) + ' is ' + vspan(net, 1) + '.</p>';
-    if(dim === 'vendor'){
-      var nv = vendorsIn(scope, P, bk).filter(function(k){ return k.nov; })[0];
-      if(nv && Math.abs(nv.v.v) >= 1) h += '<p class="fb-dim">Excludes "No Vendor" lines (spend booked without a vendor, e.g. payroll): ' + vspan(nv.v.v, 1) + '.</p>';
-    }
-    var flip = dir === 'unfav' ? 'favorable' : 'unfavorable';
-    return { html:h, chips:chipsFor([
-      'Top ' + n + ' ' + flip + ' ' + dimLabel + (scope ? ' in ' + scope.name : '') + ' ' + pLabel(P),
-      'Top ' + n + ' ' + dirLabel + dimLabel + (scope ? ' in ' + scope.name : '') + ' ' + (P.t === 'fy' ? QL[RQ] : 'full year'),
-      dim !== 'vendor' ? 'Top ' + n + ' ' + dirLabel + 'vendors ' + pLabel(P) : 'Top ' + n + ' ' + dirLabel + 'accounts ' + pLabel(P),
-      shown[0] && shown[0].E ? shown[0].E.name + ' ' + pLabel(P) : null
-    ]) };
-  }
-
-  function aUnplanned(P, bk, scope){
-    bk = bk === 'both' ? 'p' : (bk || 'p');
-    var rows = VROWS.filter(function(x){ return !scope || (scope.type === 'cat' && x.cat === scope) || (scope.type === 'gl' && x.gl === scope); })
-      .map(function(x){ return { name:x.vendor.name, sub:x.gl.code + ' ' + x.gl.name, v:withB(rowVal(x.row, P), bk) }; })
-      .filter(function(k){ return Math.abs(k.v.b) < 1 && Math.abs(k.v.w) >= 1; })
-      .sort(function(a, b){ return b.v.w - a.v.w; });
-    if(!rows.length) return { html:'<p>Every vendor/account line with Working spend in ' + esc(pLabel(P)) + (scope ? ' for ' + esc(scope.name) : '') + ' has ' + esc(bName(bk)) + ' behind it. Nothing is unplanned.</p>', chips:['Budget with no spend YTD', 'Executive summary'] };
-    var tot = rows.reduce(function(s, k){ return s + k.v.w; }, 0);
-    var h = '<p><b>' + rows.length + '</b> vendor/account lines carry Working spend with <b>no ' + esc(bName(bk)) + '</b> in ' + esc(pLabel(P)) + (scope ? ' for ' + esc(scope.name) : '') + ', totaling <b>' + fm(tot) + '</b>.</p>';
-    h += kidTable(rows, 10, P, bk);
-    h += '<p class="fb-dim">Each line is one vendor under one GL. Negative amounts are credits or reversals.</p>';
-    return { html:h, chips:chipsFor(['Budget with no spend ' + pLabel(P), 'What is not in plan full year', 'Top 5 unfavorable vendors ' + pLabel(P)]) };
-  }
-
-  function aUnused(P, bk, scope){
-    bk = bk === 'both' ? 'p' : (bk || 'p');
-    var rows = VROWS.filter(function(x){ return !scope || (scope.type === 'cat' && x.cat === scope) || (scope.type === 'gl' && x.gl === scope); })
-      .map(function(x){ return { name:x.vendor.name, sub:x.gl.code + ' ' + x.gl.name, v:withB(rowVal(x.row, P), bk) }; })
-      .filter(function(k){ return Math.abs(k.v.w) < 1 && k.v.b >= 1; })
-      .sort(function(a, b){ return b.v.b - a.v.b; });
-    if(!rows.length) return { html:'<p>No line has ' + esc(bName(bk)) + ' without Working spend in ' + esc(pLabel(P)) + '.</p>', chips:['What is not in plan YTD?'] };
-    var tot = rows.reduce(function(s, k){ return s + k.v.b; }, 0);
-    var h = '<p><b>' + rows.length + '</b> lines have <b>' + esc(bName(bk)) + ' but no Working spend</b> in ' + esc(pLabel(P)) + (scope ? ' for ' + esc(scope.name) : '') + ': <b>' + fm(tot) + '</b> of budget not used so far.</p>';
-    h += kidTable(rows, 10, P, bk);
-    h += '<p class="fb-dim">Check whether these are timing (invoice not yet received / accrual missing) or true savings that can be released.</p>';
-    return { html:h, chips:chipsFor(['What is not in plan ' + pLabel(P), 'Budget utilization', 'Executive summary']) };
-  }
-
-  function aUtil(E, bk){
-    E = E || TOTAL;
-    bk = bk === 'both' ? 'p' : (bk || 'p');
-    var ytd = ev(E, { t:'ytd' }, bk), fy = ev(E, { t:'fy' }, bk);
-    var elapsed = (RM + 1) / 12, used = fy.b ? ytd.w / fy.b : null;
-    var left = 11 - RM, remaining = fy.b - ytd.w, runRate = ytd.w / (RM + 1), need = left > 0 ? remaining / left : 0;
-    var h = '<div class="fb-h">Budget utilization · ' + esc(E.name) + '</div>';
-    if(used === null){
-      h += '<p>' + esc(E.name) + ' has no full-year ' + esc(bName(bk)) + '. YTD Working is ' + fm(ytd.w) + '.</p>';
-      return { html:h, chips:['Budget utilization'] };
-    }
-    var pace = used * 100 - elapsed * 100;
-    h += '<p>Through <b>' + esc(MONTHS[RM]) + '</b> (' + (RM + 1) + ' of 12 months, ' + (elapsed * 100).toFixed(0) + '% of the year), ' + esc(E.name) + ' has used <b>' + (used * 100).toFixed(1) + '%</b> of its full-year ' + esc(bName(bk)) + ' (' + fm(ytd.w) + ' of ' + fm(fy.b) + '). '
-      + (Math.abs(pace) < 3 ? 'That is roughly on a straight-line pace.' : pace > 0 ? 'That is <span class="fb-bad">ahead of a straight-line pace</span> by ' + pace.toFixed(1) + ' pts.' : 'That is <span class="fb-good">behind a straight-line pace</span> by ' + Math.abs(pace).toFixed(1) + ' pts.') + '</p>';
-    h += '<p>Against the time-phased ' + esc(bName(bk)) + ', YTD is ' + vspan(ytd.v, THR.ytd * scaleOf(E)) + ' (' + pctPlain(ytd.w, ytd.b) + ' of YTD ' + esc(bName(bk)) + ').</p>';
-    if(left > 0) h += '<p>Remaining budget: <b>' + fm(remaining) + '</b> for ' + left + ' months → <b>' + fm(need) + '/month</b> to land on ' + esc(bName(bk)) + ', vs a YTD average run-rate of ' + fm(runRate) + '/month.</p>';
-    h += '<p>Full-year Working is ' + fm(fy.w) + ', ' + vspan(fy.v, THR.fy * scaleOf(E)) + ' vs ' + esc(bName(bk)) + ' ' + tag(fy.v, THR.fy * scaleOf(E)) + '.</p>';
-    if(E.type === 'total'){
-      var rows = CATS.map(function(c){ var a = ev(c, { t:'ytd' }, bk), b = ev(c, { t:'fy' }, bk); return { name:c.name, ytd:a.w, plan:b.b, used:b.b ? a.w / b.b : null }; })
-        .filter(function(r){ return Math.abs(r.plan) >= 1 || Math.abs(r.ytd) >= 1; })
-        .sort(function(a, b){ return (b.used === null ? 9 : b.used) - (a.used === null ? 9 : a.used); });
-      h += '<div class="fb-sub">By category (YTD Working ÷ FY ' + esc(bk === 'f' ? 'FCST' : 'Plan') + ')</div><table class="fb-t fb-tw"><thead><tr><th></th><th>FY budget</th><th>YTD</th><th>Used</th><th>Left</th></tr></thead><tbody>';
-      rows.forEach(function(r){
-        var u = r.used === null ? 'no plan' : (r.used * 100).toFixed(0) + '%';
-        var c = r.used === null ? 'fb-bad' : (r.used - elapsed > 0.05 ? 'fb-bad' : r.used - elapsed < -0.05 ? 'fb-good' : 'fb-neu');
-        h += '<tr><td>' + esc(r.name) + '</td><td>' + fm(r.plan) + '</td><td>' + fm(r.ytd) + '</td><td class="' + c + '">' + u + '</td><td>' + fm(r.plan - r.ytd) + '</td></tr>';
-      });
-      h += '</tbody></table><p class="fb-dim">Red = consuming faster than ' + (elapsed * 100).toFixed(0) + '% of the year elapsed; green = slower.</p>';
-    }
-    if(DATA.hasOpex) h += '<p class="fb-dim">The OPEX Feed has its own Budget Utilization view in the sidebar.</p>';
-    return { html:h, chips:chipsFor(['Monthly trend' + (E.type !== 'total' ? ' for ' + E.name : ''), 'Budget with no spend YTD', E.type === 'total' ? 'Executive summary' : E.name + ' vs plan']) };
-  }
-
-  function aTrend(E, bk){
-    E = E || TOTAL;
-    bk = bk === 'both' ? 'p' : (bk || 'p');
-    var rows = [], cum = 0;
-    for(var i = 0; i <= RM; i++){ var x = ev(E, { t:'m', i:i }, bk); cum += x.v; rows.push({ m:MONTHS[i], x:x, cum:cum }); }
-    var t = THR.m * scaleOf(E);
-    var h = '<div class="fb-h">Monthly trend · ' + esc(E.name) + ' vs ' + esc(bName(bk)) + '</div>';
-    var avg = rows.reduce(function(s, r){ return s + r.x.w; }, 0) / rows.length;
-    var last3 = rows.slice(-3), prev3 = rows.slice(-6, -3);
-    var a3 = last3.reduce(function(s, r){ return s + r.x.w; }, 0) / last3.length;
-    var peak = rows.slice().sort(function(a, b){ return b.x.w - a.x.w; })[0];
-    var s = '<p>Average monthly Working ' + MONTHS[0] + '–' + MONTHS[RM] + ' is <b>' + fm(avg) + '</b>. ';
-    if(prev3.length === 3){
-      var p3 = prev3.reduce(function(s2, r){ return s2 + r.x.w; }, 0) / 3, ch = p3 ? (a3 - p3) / Math.abs(p3) * 100 : 0;
-      s += 'The last 3 months average ' + fm(a3) + ' vs ' + fm(p3) + ' in the 3 months before (' + (ch > 0 ? '+' : '') + ch.toFixed(0) + '%), so spend is ' + (Math.abs(ch) < 5 ? 'flat' : ch > 0 ? 'trending up' : 'trending down') + '. ';
-    }
-    s += 'Peak month: ' + esc(peak.m) + ' at ' + fm(peak.x.w) + '. Cumulative variance through ' + esc(MONTHS[RM]) + ': ' + vspan(cum, THR.ytd * scaleOf(E)) + '.</p>';
-    h += s + '<table class="fb-t fb-tw"><thead><tr><th></th><th>Working</th><th>' + (bk === 'f' ? 'FCST' : 'Plan') + '</th><th>Var</th><th>Cum. var</th></tr></thead><tbody>';
-    rows.forEach(function(r){ h += '<tr' + (r.m === MONTHS[RM] ? ' class="fb-hl"' : '') + '><td>' + esc(r.m) + '</td><td>' + fm(r.x.w) + '</td><td>' + fm(r.x.b) + '</td><td>' + vspan(r.x.v, t) + '</td><td>' + vspan(r.cum, t) + '</td></tr>'; });
-    h += '</tbody></table>';
-    var fy = ev(E, { t:'fy' }, bk);
-    if(Math.abs(fy.b) >= 1) h += '<p class="fb-dim">Simple run-rate check: YTD average × 12 = ' + fm(avg * 12) + ' vs full-year ' + esc(bName(bk)) + ' ' + fm(fy.b) + ' (' + vspan(avg * 12 - fy.b, THR.fy * scaleOf(E)) + '). This is a naive extrapolation, not a forecast.</p>';
-    return { html:h, chips:chipsFor([E.type === 'total' ? 'Budget utilization' : 'Budget utilization for ' + E.name, E.type === 'total' ? 'Executive summary' : E.name + ' vs plan', 'Monthly trend' + (E.type !== 'total' ? ' for ' + E.name : '') + ' vs ' + (bk === 'p' ? 'forecast' : 'plan')]) };
-  }
-
-  function hcStatus(e){
-    if(e.tbh){ if(e.p > 0 && Math.abs(e.w) < 1) return 'Open, not started'; if(e.p > 0 && e.w > 0) return 'Filling / started'; if(Math.abs(e.p) < 1 && e.w > 0) return 'Added, not in plan'; return 'No cost'; }
-    if(Math.abs(e.p) < 1 && e.w > 0) return 'Not in plan (new hire / transfer)';
-    if(e.p > 0 && Math.abs(e.w) < 1) return 'Planned, no cost';
-    return e.w - e.p > 0 ? 'Above plan' : e.w - e.p < 0 ? 'Below plan' : 'On plan';
-  }
-  function aHC(sub){
-    if(!HC || !HC.salary) return { html:'<p>This board was built without an HC feed, so headcount detail is not available. The Comp and Benefits category in the BvA feeds still covers payroll cost.</p>', chips:['Comp and Benefits vs plan'] };
-    var s = HC.salary, v = s.workTotal - s.planTotal;
-    var emps = (HC.employees || []).map(function(e){ return { n:e.n, p:+e.p || 0, w:+e.w || 0, tbh:!!e.tbh }; });
-    var h = '';
-    if(sub === 'tbh' || sub === 'new'){
-      var list = sub === 'tbh' ? emps.filter(function(e){ return e.tbh; }) : emps.filter(function(e){ return !e.tbh && Math.abs(e.p) < 1 && e.w > 0; });
-      h += '<div class="fb-h">' + (sub === 'tbh' ? 'TBH roles' : 'Hires not in plan') + ' · ' + list.length + '</div>';
-      if(!list.length) return { html:h + '<p>None in the HC feed.</p>', chips:['Headcount'] };
-      h += '<table class="fb-t"><thead><tr><th></th><th>Plan</th><th>Working</th><th>Var</th></tr></thead><tbody>';
-      list.sort(function(a, b){ return Math.abs(b.w - b.p) - Math.abs(a.w - a.p); }).forEach(function(e){ h += '<tr><td>' + esc(e.n) + '<small>' + esc(hcStatus(e)) + '</small></td><td>' + fm(e.p) + '</td><td>' + fm(e.w) + '</td><td>' + vspan(e.w - e.p, 5000) + '</td></tr>'; });
-      h += '</tbody></table>';
-      if(sub === 'tbh'){
-        var open = list.filter(function(e){ return e.p > 0 && Math.abs(e.w) < 1; });
-        if(open.length) h += '<p>' + open.length + ' open req' + (open.length > 1 ? 's' : '') + ' with ' + fm(open.reduce(function(a, e){ return a + e.p; }, 0)) + ' of Plan and no Working cost yet: a source of HC savings if the hire slips.</p>';
-      }
-      return { html:h, chips:['Headcount', sub === 'tbh' ? 'Hires not in plan' : 'Open TBH roles'] };
-    }
-    h += '<div class="fb-h">Headcount cost · Salary Accrued</div>';
-    h += '<p>Full year Salary Accrued is <b>' + fm(s.workTotal) + '</b> Working vs ' + fm(s.planTotal) + ' Plan → <b>' + vspan(v, THR.q) + '</b>' + (pct(v, s.planTotal) ? ' (' + pct(v, s.planTotal) + ')' : '') + ' ' + tag(v, THR.q) + '.';
-    if(s.q && s.qWork && s.q[RQ] != null) h += ' ' + esc(QL[RQ]) + ': ' + fm(s.qWork[RQ]) + ' vs ' + fm(s.q[RQ]) + ' (' + vspan(s.qWork[RQ] - s.q[RQ], THR.m) + ').';
-    h += '</p>';
-    if(s.q && s.qWork){
-      h += '<table class="fb-t"><thead><tr><th></th><th>Plan</th><th>Working</th><th>Var</th></tr></thead><tbody>';
-      for(var i = 0; i < 4; i++) h += '<tr' + (i === RQ ? ' class="fb-hl"' : '') + '><td>' + esc(QL[i]) + '</td><td>' + fm(s.q[i]) + '</td><td>' + fm(s.qWork[i]) + '</td><td>' + vspan((s.qWork[i] || 0) - (s.q[i] || 0), THR.m) + '</td></tr>';
-      h += '</tbody></table>';
-    }
-    var m = HC.moves || {};
-    var openT = emps.filter(function(e){ return e.tbh && e.p > 0 && Math.abs(e.w) < 1; }).length;
-    var newH = emps.filter(function(e){ return !e.tbh && Math.abs(e.p) < 1 && e.w > 0; });
-    h += '<p>Ending HC: <b>' + (m.endingWork != null ? m.endingWork : '—') + '</b> Working vs ' + (m.endingPlan != null ? m.endingPlan : '—') + ' Plan. TBH roles in plan: ' + (m.tbhPlan != null ? m.tbhPlan : '—') + ' (' + openT + ' still open). Hires not in plan: ' + newH.length + (newH.length ? ' (' + newH.map(function(e){ return esc(e.n.replace(/\s+-\s+\S+$/, '')); }).join(', ') + ')' : '') + '.</p>';
-    var top = emps.slice().sort(function(a, b){ return Math.abs(b.w - b.p) - Math.abs(a.w - a.p); }).slice(0, 5);
-    h += '<div class="fb-sub">Largest employee variances</div><table class="fb-t"><thead><tr><th></th><th>Plan</th><th>Working</th><th>Var</th></tr></thead><tbody>';
-    top.forEach(function(e){ h += '<tr><td>' + esc(e.n) + '<small>' + esc(hcStatus(e)) + '</small></td><td>' + fm(e.p) + '</td><td>' + fm(e.w) + '</td><td>' + vspan(e.w - e.p, 5000) + '</td></tr>'; });
-    h += '</tbody></table>';
-    var hn = boardNotes().filter(function(n){ return n.sid === 'sec-hc'; });
-    h += notesHtml(hn);
-    return { html:h, chips:['Open TBH roles', 'Hires not in plan', 'Comp and Benefits vs plan'] };
-  }
-
-  function aEmployee(E){
-    var h = '<div class="fb-h">' + esc(E.name) + ' <small>' + (E.tbh ? 'TBH role' : 'Employee') + '</small></div>';
-    if(E.hc){
-      var e = { n:E.hc.n, p:+E.hc.p || 0, w:+E.hc.w || 0, tbh:!!E.hc.tbh }, v = e.w - e.p;
-      h += '<p>Salary Accrued full year: Working <b>' + fm(e.w) + '</b> vs Plan ' + fm(e.p) + ' → <b>' + vspan(v, 5000) + '</b>. Status: ' + esc(hcStatus(e)) + '.</p>';
-    } else {
-      h += '<p class="fb-dim">Not in the HC feed.</p>';
-    }
-    if(E.te.length && TE){
-      var tot = 0;
-      h += '<div class="fb-sub">T&amp;E</div><table class="fb-t fb-tw"><thead><tr><th></th>' + TE.headers.map(function(x){ return '<th>' + esc(x) + '</th>'; }).join('') + '<th>Total</th></tr></thead><tbody>';
-      E.te.forEach(function(t){ tot += +t.g || 0; h += '<tr><td>' + esc(String(t.v || '').replace(/\s*-\s*$/, '') || '—') + '</td>' + t.vals.map(function(n){ return '<td>' + (Math.abs(n) >= 0.5 ? fm(n) : '—') + '</td>'; }).join('') + '<td>' + fm(t.g) + '</td></tr>'; });
-      h += '</tbody></table><p>Total T&amp;E: <b>' + fm(tot) + '</b>.</p>';
-    }
-    h += notesHtml(notesFor(E));
-    return { html:h, chips:['Headcount', 'T&E by employee'] };
-  }
-
-  function aTE(){
-    var cat = CATS.filter(function(c){ return /travel/i.test(c.name); })[0];
-    var h = '<div class="fb-h">Travel &amp; Expense</div>';
-    if(cat){
-      var y = ev(cat, { t:'ytd' }, 'p'), f = ev(cat, { t:'fy' }, 'p');
-      h += '<p>In the BvA feeds, <b>' + esc(cat.name) + '</b> is ' + fm(y.w) + ' YTD vs ' + fm(y.p) + ' Plan (' + vspan(y.v, 2500) + ') and ' + fm(f.w) + ' full year vs ' + fm(f.p) + ' (' + vspan(f.v, 2500) + ').</p>';
-    }
-    if(!TE || !TE.rows || !TE.rows.length){ h += '<p class="fb-dim">No T&amp;E feed was loaded for this board.</p>'; return { html:h, chips:cat ? [cat.name + ' vs plan'] : [] }; }
-    var people = {};
-    TE.rows.forEach(function(t){ var k = String(t.e || '').replace(/\s+-\s+\S+$/, '').trim() || 'Unassigned'; if(/^no employee/i.test(k)) k = 'No employee ID'; people[k] = (people[k] || 0) + (+t.g || 0); });
-    var ranked = Object.keys(people).map(function(k){ return { n:k, g:people[k] }; }).filter(function(r){ return Math.abs(r.g) >= 0.5; }).sort(function(a, b){ return b.g - a.g; });
-    var totals = TE.total && TE.total.vals ? TE.total.vals : [];
-    h += '<div class="fb-sub">T&amp;E feed by month</div><table class="fb-t fb-tw"><thead><tr>' + TE.headers.map(function(x){ return '<th>' + esc(x) + '</th>'; }).join('') + '<th>Total</th></tr></thead><tbody><tr>'
-      + totals.map(function(n){ return '<td>' + fm(n) + '</td>'; }).join('') + '<td><b>' + fm(TE.total.g) + '</b></td></tr></tbody></table>';
-    h += '<div class="fb-sub">By employee</div><table class="fb-t"><thead><tr><th></th><th>Total</th><th>Share</th></tr></thead><tbody>';
-    ranked.slice(0, 8).forEach(function(r){ h += '<tr><td>' + esc(r.n) + '</td><td>' + fm(r.g) + '</td><td>' + pctPlain(r.g, TE.total.g) + '</td></tr>'; });
-    h += '</tbody></table>';
-    if(ranked[0]) h += '<p>' + esc(ranked[0].n) + ' accounts for ' + pctPlain(ranked[0].g, TE.total.g) + ' of the T&amp;E in the feed.</p>';
-    return { html:h, chips:chipsFor([ranked[0] ? ranked[0].n : null, cat ? cat.name + ' vs plan' : null, 'Headcount']) };
-  }
-
-  function aActions(){
-    var items = [];
-    d.querySelectorAll('#actList .act-item').forEach(function(it){
-      if(isHidden(it)) return;
-      var t = it.querySelector('textarea'), cb = it.querySelector('input[type="checkbox"]');
-      var txt = t ? String(t.value || t.textContent || '').trim() : '';
-      if(txt) items.push({ t:txt, done:!!(cb && cb.checked) });
-    });
-    if(!items.length) return { html:'<p>There are no follow-up actions on the board.</p>', chips:['Executive summary'] };
-    var open = items.filter(function(i){ return !i.done; });
-    var h = '<p><b>' + open.length + '</b> open of ' + items.length + ' follow-up actions.</p><ul class="fb-ul">';
-    items.forEach(function(i){ h += '<li' + (i.done ? ' class="fb-done"' : '') + '>' + (i.done ? '✓ ' : '') + esc(i.t) + '</li>'; });
-    return { html:h + '</ul>', chips:['Executive summary'] };
-  }
-
-  function aFallback(qn){
-    var weak = [];
-    var qts = queryTokens(qn);
-    if(qts.length) ALL.forEach(function(E){ var s = scoreEntity(E, qts, qn); if(s >= 0.6) weak.push({ E:E, s:s }); });
-    weak.sort(function(a, b){ return b.s - a.s; });
-    var miss = qts.filter(function(t){ return !/^(and|y|what|about)$/.test(t); });
-    var h = (miss.length ? '<p>I could not find "<b>' + esc(miss.join(' ')) + '</b>" in this board\'s categories, GL accounts, vendors or people.</p>' : '')
-      + '<p>I work with fixed rules over the board data, so try naming a <b>category, account, vendor or person</b>, a <b>period</b> (Aug, Q2, YTD, full year) and <b>Plan or Forecast</b>.</p>';
-    var chips = weak.slice(0, 3).map(function(w){ return w.E.name + ' vs plan'; });
-    if(chips.length) h += '<p class="fb-dim">Did you mean one of these?</p>';
-    return { html:h, chips:chips.concat(['Top 5 unfavorable vendors this quarter', 'Help']).slice(0, 4) };
-  }
-
-  /* ---------------- No Vendor line items ---------------- */
-  function rangeLbl(ms){ if(!ms.length) return ''; return ms.length === 1 ? MONTHS[ms[0]] : MONTHS[ms[0]] + ' – ' + MONTHS[ms[ms.length - 1]]; }
-  function nvBlock(g, P, bk, full){
-    var o = nvSplit(g, monthsOf(P), bk), bn = bk === 'f' ? 'FCST' : 'Plan', t = 2500;
-    var h = '<div class="fb-sub">' + (full ? esc(g.label) : 'No Vendor line items · ' + esc(pLabel(P))) + '</div>';
-    if(o.proj.length){
-      if(o.rows.length || Math.abs(o.unW) >= 0.5 || Math.abs(o.unB) >= 0.5){
-        h += '<table class="fb-t"><thead><tr><th>' + esc(rangeLbl(o.proj)) + '</th><th>Working</th><th>' + bn + '</th><th>Var</th></tr></thead><tbody>';
-        o.rows.slice(0, 6).forEach(function(r){
-          var tg = Math.abs(r.b) < 0.5 ? 'not in ' + bn : Math.abs(r.w) < 0.5 ? 'no Working' : '';
-          h += '<tr><td>' + esc(r.it.d) + (tg ? '<small>' + tg + '</small>' : '') + '</td><td>' + fm(r.w) + '</td><td>' + fm(r.b) + '</td><td>' + vspan(r.v, t) + '</td></tr>';
-        });
-        if(o.rows.length > 6) h += '<tr class="fb-more"><td colspan="4">+ ' + (o.rows.length - 6) + ' more</td></tr>';
-        if(g.board && (Math.abs(o.unW) >= 0.5 || Math.abs(o.unB) >= 0.5)) h += '<tr class="fb-bufrow"><td>Not explained by line items</td><td>' + fm(o.unW) + '</td><td>' + fm(o.unB) + '</td><td>' + vspan(o.unW - o.unB, t) + '</td></tr>';
-        h += '</tbody></table>';
-      } else h += '<p class="fb-dim">No projected line items in ' + esc(rangeLbl(o.proj)) + '.</p>';
-    }
-    if(o.closed.length && g.board){
-      h += '<p class="fb-dim">' + esc(rangeLbl(o.closed)) + ' are closed: actual No Vendor ' + fm(o.cW) + ' vs ' + fm(o.cB) + ' ' + bn + ' (' + vspan(o.cW - o.cB, t) + '). Actuals carry no line detail'
-        + (o.plan.length ? '; planned lines: ' + o.plan.slice(0, 3).map(function(r){ return esc(r.it.d) + ' ' + fm(r.b); }).join(', ') + (o.plan.length > 3 ? ', …' : '') : '') + '.</p>';
-    }
-    return h;
-  }
-  function aNV(scope, P, bk){
-    bk = bk === 'both' ? 'p' : (bk || 'p');
-    if(!NV) return { html:'<p>This board was built without the No Vendor feed, so I can\'t break down the "No Vendor" amounts. Upload the optional NO VENDOR feed and regenerate the board.</p>', chips:['Real vs projected full year', 'Executive summary'] };
-    var gl = NV.gls.filter(function(g){ return !scope || (scope.type === 'gl' && g.code === scope.code) || (scope.type === 'cat' && norm(g.cat) === norm(scope.name)); });
-    var withItems = gl.filter(function(g){ return g.items.some(function(it){ return it.nv; }); });
-    var h = '<div class="fb-h">No Vendor line items' + (scope ? ' · ' + esc(scope.name) : '') + ' <small>' + esc(pLabel(P)) + ' vs ' + esc(bName(bk)) + '</small></div>';
-    var ms = monthsOf(P), proj = ms.filter(function(m){ return m > RM; }), tw = 0, tb = 0, uw = 0;
-    withItems.forEach(function(g){ var o = nvSplit(g, ms, bk); tw += o.detW; tb += o.boardW; if(g.board) uw += o.unW; });
-    if(proj.length && withItems.length) h += '<p>In the projected months (' + esc(rangeLbl(proj)) + '), line items explain <b>' + fm(tw) + '</b> of ' + fm(tb) + ' No Vendor Working' + (Math.abs(uw) >= 0.5 ? '; <b>' + fm(uw) + '</b> is not explained by line items.' : ', so it fully reconciles.') + '</p>';
-    else if(!proj.length) h += '<p>All months in ' + esc(pLabel(P)) + ' are closed. No Vendor actuals carry no line detail, so I show the planned lines next to the actual total.</p>';
-    NV.warnings.concat(NV.notes).forEach(function(n){ h += '<p class="fb-dim">' + esc(n) + '</p>'; });
-    withItems.forEach(function(g){ h += nvBlock(g, P, bk, true); });
-    if(!withItems.length) h += '<p>There are no No Vendor line items' + (scope ? ' for ' + esc(scope.name) : '') + ' in the feed.</p>';
-    var nod = gl.filter(function(g){ return !g.items.length && g.board; });
-    if(nod.length) h += '<p class="fb-dim">No Vendor amounts without line detail: ' + nod.slice(0, 4).map(function(g){ return esc(g.label); }).join('; ') + (nod.length > 4 ? '; +' + (nod.length - 4) + ' more' : '') + '.</p>';
-    var first = withItems[0] && withItems[0].items.filter(function(it){ return it.nv; })[0];
-    return { html:h, chips:chipsFor([
-      'No Vendor line items' + (scope ? ' ' + scope.name : '') + ' vs ' + (bk === 'p' ? 'forecast' : 'plan'),
-      'No Vendor line items' + (scope ? ' ' + scope.name : '') + ' ' + (P.t === 'fy' ? QL[RQ] : 'full year'),
-      'Where are the savings parked?',
-      first ? first.d : null
-    ]) };
-  }
-  function aNVLine(E){
-    var it = E.it, g = E.g, all = [0,1,2,3,4,5,6,7,8,9,10,11];
-    var proj = all.filter(function(m){ return m > RM; }), closed = all.filter(function(m){ return m <= RM; });
-    var fproj = proj.filter(function(m){ return m >= NVFS; });
-    var h = '<div class="fb-h">' + esc(it.d) + ' <small>' + esc(typeLabel(E)) + '</small></div>';
-    h += '<p class="fb-dim">' + esc(g.label) + (g.cat ? ' · ' + esc(g.cat) : '') + (it.dt ? ' · contract ' + esc(it.dt) : '') + '</p>';
-    var w = nvSum(it.w, proj), p = nvSum(it.p, proj), f = nvSum(it.f, fproj), pFY = nvSum(it.p, all), pc = nvSum(it.p, closed);
-    if(proj.length){
-      h += '<p>Projected ' + esc(rangeLbl(proj)) + ': Working <b>' + fm(w) + '</b> vs ' + fm(p) + ' ' + esc(PLAN) + ' (' + vspan(w - p, 2500) + ') and ' + fm(f) + ' ' + esc(FCST) + ' (' + vspan(w - f, 2500) + ').'
-        + (Math.abs(p) < 0.5 && Math.abs(w) >= 0.5 ? ' This line is <b>not in the Plan</b>.' : Math.abs(w) < 0.5 && Math.abs(p) >= 0.5 ? ' Working no longer carries this line.' : '') + '</p>';
-    }
-    h += '<p>Full-year ' + esc(PLAN) + ' for this line: ' + fm(pFY) + (closed.length && Math.abs(pc) >= 0.5 ? ', of which ' + fm(pc) + ' falls in the closed months (' + esc(rangeLbl(closed)) + '), where actuals have no line detail.' : '.') + '</p>';
-    if(proj.length){
-      h += '<table class="fb-t fb-tw"><thead><tr><th></th><th>Working</th><th>Plan</th><th>Forecast</th></tr></thead><tbody>';
-      proj.forEach(function(m){ h += '<tr><td>' + esc(MONTHS[m]) + '</td><td>' + fm(it.w[m] || 0) + '</td><td>' + fm(it.p[m] || 0) + '</td><td>' + (m >= NVFS ? fm(it.f[m] || 0) : '—') + '</td></tr>'; });
-      h += '</tbody></table>';
-    }
-    if(!it.nv) h += '<p class="fb-dim">This line is booked with vendor ' + esc(it.v) + ', so it shows in the vendor rows, not in No Vendor.</p>';
-    return { html:h, chips:chipsFor(['No Vendor line items' + (g.cat ? ' ' + g.cat : ''), 'Where are the savings parked?', 'Real vs projected full year']) };
-  }
-
-  /* ---------------- router ---------------- */
-  var CTX = null;
-  var FOLLOWABLE = { entity:1, top:1, total:1, unplanned:1, unused:1, util:1, trend:1, buffer:1, compare:1, nv:1 };
-  /* ---------------- comparisons ---------------- */
-  function multiEntities(qn){
-    var chunks = qn.split(/\b(?:vs|versus|against|contra|compared to|compare|comparar|compara|comparado con|frente a|and|y|with|con)\b|,/);
-    var out = [], seen = {};
-    chunks.forEach(function(c){
-      c = String(c || '').trim(); if(!c) return;
-      var f = findEntities(c, typeHint(c), ['cat','gl','vendor']);
-      if(f[0] && !seen[f[0].E.key]){ seen[f[0].E.key] = 1; out.push(f[0].E); }
-    });
-    return out.slice(0, 4);
-  }
-  function short(n){ n = String(n); return n.length > 18 ? n.slice(0, 17) + '…' : n; }
-  function aCompare(list, P, bk){
-    bk = bk === 'both' ? 'p' : (bk || 'p');
-    var sc = list.every(function(E){ return E.type === 'cat'; }) ? 1 : 0.4, t = thrOf(P, sc);
-    var h = '<div class="fb-h">' + list.map(function(E){ return esc(E.name); }).join(' vs ') + ' <small>' + esc(pLabel(P)) + ' vs ' + esc(bName(bk)) + '</small></div>';
-    h += '<table class="fb-t fb-tw"><thead><tr><th></th><th>Working</th><th>' + (bk === 'f' ? 'FCST' : 'Plan') + '</th><th>Var</th><th>%</th></tr></thead><tbody>';
-    var vals = list.map(function(E){ return { E:E, x:ev(E, P, bk) }; });
-    vals.forEach(function(r){ h += '<tr><td>' + esc(r.E.name) + '<small>' + esc(typeLabel(r.E)) + '</small></td><td>' + fm(r.x.w) + '</td><td>' + fm(r.x.b) + '</td><td>' + vspan(r.x.v, t) + '</td><td>' + (pct(r.x.v, r.x.b) || '—') + '</td></tr>'; });
-    h += '</tbody></table>';
-    var parts = vals.map(function(r){
-      if(Math.abs(r.x.b) < 1 && Math.abs(r.x.w) >= 1) return esc(r.E.name) + ' has ' + fm(r.x.w) + ' with no ' + esc(bName(bk));
-      if(Math.abs(r.x.v) < t) return esc(r.E.name) + ' is roughly on ' + esc(bName(bk)) + ' (' + vspan(r.x.v, t) + ')';
-      return esc(r.E.name) + ' is ' + (r.x.v > 0 ? 'over' : 'under') + ' by ' + vspan(r.x.v, t);
-    });
-    h += '<p>In ' + esc(pLabel(P)) + ', ' + parts.join('; ') + '.';
-    var big = vals.slice().sort(function(a, b){ return b.x.w - a.x.w; });
-    if(big.length > 1 && big[1].x.w > 0) h += ' ' + esc(big[0].E.name) + ' spends ' + (big[0].x.w / big[1].x.w).toFixed(1) + '× ' + esc(big[1].E.name) + '.';
-    h += '</p>';
-    var Ps = [{ t:'m', i:RM }, { t:'q', i:RQ }, { t:'ytd' }, { t:'fy' }];
-    h += '<div class="fb-sub">Variance vs ' + esc(bName(bk)) + ' by period</div><table class="fb-t fb-tw"><thead><tr><th></th>' + list.map(function(E){ return '<th>' + esc(short(E.name)) + '</th>'; }).join('') + '</tr></thead><tbody>';
-    Ps.forEach(function(Q){ h += '<tr' + (samePeriod(Q, P) ? ' class="fb-hl"' : '') + '><td>' + esc(pLabel(Q)) + '</td>' + list.map(function(E){ return '<td>' + vspan(ev(E, Q, bk).v, thrOf(Q, sc)) + '</td>'; }).join('') + '</tr>'; });
-    h += '</tbody></table>';
-    var names = list.map(function(E){ return E.name; }).join(' vs ');
-    return { html:h, chips:chipsFor([
-      P.t === 'fy' ? names + ' ' + QL[RQ] : names + ' full year',
-      names + ' vs ' + (bk === 'p' ? 'forecast' : 'plan'),
-      list[0].name + ' ' + pLabel(P),
-      list[1].name + ' ' + pLabel(P)
-    ]) };
-  }
-
-  /* ---------------- premise check ("why is X over plan?") ---------------- */
-  function assertDir(qn){
-    if(/\b(over|above|overspen\w*|exceed\w*|sobre|encima|excedid\w*|sobregir\w*|higher than|mas alto)\b/.test(qn) && !/\bover time\b/.test(qn)) return 'unfav';
-    if(/\b(under|below|underspen\w*|debajo|ahorr\w*|savings?|lower than|mas bajo)\b/.test(qn)) return 'fav';
-    return null;
-  }
-  function premise(E, P, bk, dir){
-    if(!dir) return null;
-    var t = thrOf(P, scaleOf(E));
-    function ok(x){ return dir === 'unfav' ? x.v >= 0.5 : x.v <= -0.5; }
-    var cur = ev(E, P, bk);
-    if(ok(cur)) return null;
-    var cands = [{ t:'fy' }, { t:'ytd' }, { t:'q', i:RQ }, { t:'m', i:RM }, { t:'q', i:0 }, { t:'q', i:1 }, { t:'q', i:2 }, { t:'q', i:3 }];
-    for(var m = 0; m <= RM; m++) cands.push({ t:'m', i:m });
-    var best = null;
-    cands.forEach(function(Q){ var x = ev(E, Q, bk); if(ok(x) && (!best || Math.abs(x.v) > Math.abs(best.x.v))) best = { P:Q, x:x }; });
-    var word = dir === 'unfav' ? 'over' : 'under', nm = esc(E.name), bn = esc(bName(bk));
-    var now = 'In ' + esc(pLabel(P)) + ' ' + nm + ' is ' + (Math.abs(cur.v) < 0.5 ? 'exactly on ' + bn : (cur.v > 0 ? 'over' : 'under') + ' ' + bn + ' (' + vspan(cur.v, t) + ')');
-    if(best) return { P:best.P, note:'<p class="fb-note-q"><b>Quick check:</b> ' + now + '. It is ' + word + ' ' + bn + ' in <b>' + esc(pLabel(best.P)) + '</b> (' + vspan(best.x.v, thrOf(best.P, scaleOf(E))) + '), so here is that view.</p>' };
-    return { P:P, note:'<p class="fb-note-q"><b>Quick check:</b> ' + now + ', and it is not ' + word + ' ' + bn + ' in any period on this board.</p>' };
-  }
-
-  /* ---------------- out of scope: recommendations, scenarios, opinions ---------------- */
-  function aOutScope(kind, E, P, bk, qn){
-    bk = bk === 'both' ? 'p' : (bk || 'p');
-    var PP = P || { t:'fy' }, h = '', R, chips;
-    if(kind === 'rec'){
-      h = '<p><b>I don\'t make recommendations.</b> What to cut or keep is a business call. What I can do is show where the money is going, so that call is easier:</p>';
-      if(E){ R = aEntity(E, PP, bk, true); }
-      else {
-        R = aTop(PP, bk, 'vendor', 'unfav', 5, null);
-        var unus = VROWS.map(function(x){ return withB(rowVal(x.row, { t:'ytd' }), 'p'); }).filter(function(x){ return Math.abs(x.w) < 1 && x.p >= 1; });
-        if(unus.length) R.html += '<p class="fb-dim">Also: ' + unus.length + ' lines have Plan but no spend YTD (' + fm(unus.reduce(function(a, x){ return a + x.p; }, 0)) + ').</p>';
-      }
-      chips = ['Budget with no spend YTD', 'Top 5 unfavorable accounts full year', 'Real vs projected full year'];
-    } else if(kind === 'scenario'){
-      h = '<p><b>I can\'t run what-if scenarios.</b> I only report what is in this board\'s feeds (Working, Plan and Forecast).</p>';
-      var pm = qn.match(/(\d+(?:\.\d+)?)\s?(?:%|percent|por ?ciento)/);
-      if(pm && E){
-        var k = +pm[1] / 100, fy = ev(E, { t:'fy' }, bk), rem = 0;
-        for(var m = RM + 1; m < 12; m++){ var a = sumVals(E.rows, { t:'m', i:m }); rem += bk === 'f' ? a.f : a.p; }
-        h += '<p>For reference, plain arithmetic, not a forecast: ' + pm[1] + '% of ' + esc(E.name) + '\'s full-year Working (' + fm(fy.w) + ') is <b>' + fm(fy.w * k) + '</b>'
-          + (rem > 0 ? ', and ' + pm[1] + '% of its remaining ' + esc(bName(bk)) + ' after ' + esc(MONTHS[RM]) + ' (' + fm(rem) + ') is <b>' + fm(rem * k) + '</b>' : '') + '.</p>';
-      }
-      h += '<p class="fb-dim">Here is the baseline you would start from:</p>';
-      R = E ? aEntity(E, PP, bk, false) : aTotal(PP, bk);
-      chips = ['Budget utilization', 'Real vs projected full year', 'Executive summary'];
-    } else {
-      h = '<p><b>I can\'t judge whether something is "normal".</b> Here is the context an analyst would use to decide: the monthly pattern, the run-rate and the variance vs Plan.</p>';
-      R = aTrend(E || null, bk);
-      R.html += '<p class="fb-dim">For reference, I flag variances as material above ±$10K for a month, ±$25K for a quarter and ±$75K for the full year (lower for single vendors or accounts).</p>';
-      chips = [E ? E.name + ' vs plan' : 'Executive summary', 'Budget utilization', 'Top 5 unfavorable vendors this quarter'];
-    }
-    return { html:h + R.html, chips:chipsFor(chips) };
-  }
-
-  /* ---------------- random questions: a light joke, then back to the board ---------------- */
-  function hashStr(q){ var n = 0; for(var i = 0; i < q.length; i++) n = (n * 31 + q.charCodeAt(i)) >>> 0; return n; }
-  var RANDOM_TOPIC = /\b(weather|clima|tiempo hace|rain|lluvia|sunny|joke|chiste|funny|lunch|almuerzo|dinner|cena|coffee|cafe|hungry|hambre|pizza|food|comida|love|amor|date|novia|novio|football|futbol|soccer|sports|deporte|game|partido|how are you|como estas|que tal|who are you|quien eres|your name|tu nombre|meaning of life|sentido de la vida|bitcoin|crypto|stock market|bolsa|movie|pelicula|music|musica|song|cancion|vacation|vacaciones|weekend|fin de semana)\b/;
-  function teaser(n){
-    var Pq = { t:'q', i:RQ }, Pf = { t:'fy' }, opts = [];
-    var vq = vendorsIn(null, Pq, 'p').filter(function(k){ return !k.nov; }).sort(function(a, b){ return b.v.v - a.v.v; });
-    if(vq[0] && vq[0].v.v > 0) opts.push(esc(vq[0].name) + ' is ' + fv(vq[0].v.v) + ' over Plan in ' + esc(QL[RQ]) + '.');
-    var o = decompose(null, Pf, 'p');
-    if(Math.abs(o.buffer) >= 0.5) opts.push('without buffer moves, ' + esc(BU) + ' is ' + fv(o.excl) + ' vs Plan for the full year.');
-    var ytd = ev(TOTAL, { t:'ytd' }, 'p'); opts.push(esc(BU) + ' is ' + fv(ytd.v) + ' vs Plan year to date.');
-    var vs = vendorsIn(null, { t:'ytd' }, 'p').filter(function(k){ return !k.nov; }).sort(function(a, b){ return a.v.v - b.v.v; });
-    if(vs[0] && vs[0].v.v < 0) opts.push('the biggest vendor saving YTD is ' + esc(vs[0].name) + ' at ' + fv(vs[0].v.v) + '.');
-    return opts[n % opts.length];
-  }
-  function aRandom(qn){
-    var n = hashStr(qn), Pf = { t:'fy' }, line;
-    var fyf = ev(TOTAL, Pf, 'f'), fy = ev(TOTAL, Pf, 'p'), ytd = ev(TOTAL, { t:'ytd' }, 'p');
-    if(/weather|clima|tiempo hace|rain|lluvia|sunny/.test(qn)) line = 'The only forecast I follow is the ' + esc(FCST) + ', and today it says ' + esc(BU) + ' is ' + fv(fyf.v) + ' vs it for the full year. Bring an umbrella.';
-    else if(/joke|chiste|funny/.test(qn)) line = 'Why did the budget break up with the forecast? Too many unexplained variances.';
-    else if(/lunch|almuerzo|dinner|cena|coffee|cafe|hungry|hambre|pizza|food|comida/.test(qn)) line = 'I don\'t eat, I only expense. ' + (TE && TE.total ? 'T&amp;E in this board\'s feed is ' + fm(TE.total.g) + ' so far.' : 'And this board has no T&amp;E feed, so I can\'t even do that.');
-    else if(/love|amor|date|novia|novio/.test(qn)) line = 'My only relationship is with the Plan, and it\'s complicated: ' + fv(fy.v) + ' for the full year.';
-    else if(/football|futbol|soccer|sports|deporte|game|partido/.test(qn)) line = 'The only score I keep is the variance: ' + esc(BU) + ' is ' + fv(ytd.v) + ' vs Plan year to date. Still in the game.';
-    else if(/how are you|como estas|que tal/.test(qn)) line = 'Running favorable, thanks for asking: ' + esc(BU) + ' is ' + fv(ytd.v) + ' vs Plan year to date.';
-    else if(/who are you|quien eres|your name|tu nombre/.test(qn)) line = 'I\'m Felipe, a rule-based FP&amp;A analyst. I live inside this board and I only speak Working, Plan and Forecast.';
-    else line = [
-      'That\'s outside my cost center. I\'m budgeted only for BvA questions (and I\'m tracking favorable).',
-      'I searched every GL account for that. Closest match: nothing. Want something I can actually reconcile?',
-      'Interesting question, but if it doesn\'t have a Working and a Plan column, I\'m lost.',
-      'I\'d need a bigger budget to answer that. Meanwhile, here\'s something I do know.'
-    ][n % 4];
-    var h = '<p>' + line + '</p><p class="fb-dim">Fun fact from this board: ' + teaser(n) + '</p><p>Ask me about a category, account, vendor or period, or pick one of these:</p>';
-    return { html:h, chips:['Executive summary', 'Top 5 unfavorable vendors this quarter', 'Real vs projected full year', 'Help'] };
-  }
-
-  var RX = {
-    menu: /^(menu|main menu|menu principal|sections?|secciones|seccion|home|back|volver|regresar|inicio)\b/,
-    help: /^(help|ayuda|hi|hello|hola|hey|start)\b|what can (you|i) (do|ask)|que (puedo|puedes)|como funciona|how does this work|what do you know/,
-    actions: /\b(actions?|follow ?ups?|to ?dos?|pendientes?|acciones|tareas|action items?)\b/,
-    hcStrong: /\b(headcount|hc|tbh|tbhs|open reqs?|open roles?|reqs?|vacantes?|plantilla|hires?|hiring|new hires?|contrataciones?|employees|empleados|salary accrued|salario devengado)\b/,
-    hcWeak: /\b(salary|salaries|salario|salarios|payroll|nomina|people cost)\b/,
-    tbh: /\b(tbh|tbhs|open reqs?|open roles?|vacantes?|reqs?)\b/,
-    newh: /\b(new hires?|hires? not in plan|not in plan hires?|contrataciones? no planead|nuevos? ingresos?)\b/,
-    te: /\b(t and e|t e|tne|travel|viajes?|viaticos?|expense reports?)\b/,
-    unplanned: /not in (the )?(plan|budget|forecast)|unplanned|unbudgeted|no presupuestad|fuera del (plan|presupuesto)|sin (plan|presupuesto)|no planead|without (a )?(plan|budget)|no (plan|budget) behind|new vendors?|nuevos proveedores/,
-    unused: /unused|no spend|not spent|sin gasto|sin usar|no usad|untouched|zero spend|no activity|sin actividad|budget (with|but) no|plan (with|but) no (spend|working)|not used/,
-    buffer: /\b(buffers?|parked|park|reallocat\w*|re allocat\w*|reasign\w*|realocad\w*|excluding buffer|ex buffer|sin (el )?buffer|without (the )?buffer|underlying|real vs (projected|proyectado|projection)|closed vs projected|actuals? vs projected|actual vs projection|savings (parked|allocated|moved|reallocated)|where are the savings|donde estan los ahorros|ahorros? (reasignados?|guardados?|movidos?))\b/,
-    util: /utiliz|consum|burn|remaining|restante|disponible|queda|quedan|headroom|how much (budget )?(is )?left|percent of (plan|budget)|% of (plan|budget)|pacing|pace/,
-    trend: /\b(trend|trends|trending|tendencia|month over month|mom|monthly|por mes|mensual|run ?rate|evolution|evolucion|over time|by month|cada mes|month by month)\b/,
-    summary: /\b(summary|summarize|summarise|resumen|resume|overview|highlights?|executive|exec|big picture|panorama|key takeaways?|recap|status|estado general)\b|how are we doing|como vamos|como estamos|how is it going|how are we tracking/,
-    top: /\b(top|biggest|largest|main|major|ranking|rank|worst|best|mayor(es)?|principal(es)?|peores|mejores|most|highest|lowest|key drivers|drivers|mas)\b|which (vendors|accounts|categories)|cuales (son )?(los|las) (proveedores|cuentas|categorias)/,
-    why: /\bwhy\b|por que|porque|explain|explica|reason|razon|what happened|que paso|que pasa|driving|drove|driver|cause/,
-    money: /\b(total|overall|how much|cuanto|spend|spent|spending|gasto|gastos|gastamos|variance|varianza|vs|versus|against|contra|compared|working|actuals?|expense|expenses|cost|costs|budget|plan|forecast|fcst)\b/,
-    opinion: /\b(is (this|that|it|[a-z0-9 ]{1,40}) (normal|ok|okay|good|bad|healthy|worrying|concerning|a problem|reasonable|expected)|es normal|esta bien|es (bueno|malo|preocupante|razonable)|should i (worry|be worried)|debo preocupar\w*|me debo preocupar)\b/,
-    scenario: /\bwhat if\b|\bque pasa\w* si\b|\bsi (recort|cort|reduc|aument|baj|sub)\w*|\bscenarios?\b|\bescenarios?\b|\bsimula\w*|\bimpact of (cutting|reducing|adding|removing)\b|\d+(\.\d+)?\s?%|\b\d+ (percent|por ?ciento)\b/,
-    rec: /\b(should (we|i)|recommend\w*|recomiend\w*|recomendac\w*|deberia\w*|debemos|what (can|could) we cut|que (podemos|deberiamos) (recortar|cortar)|advice|aconsej\w*|consejo\w*|suggest\w*|sugier\w*|sugerenc\w*)\b/,
-    compare: /\b(compare|comparar|compara|comparison|comparacion|versus|vs|against|contra|side by side|frente a)\b/,
-    nv: /\bno vendor\b|\bsin proveedor\b|\bline items?\b|\bpartidas?\b|\bdetalle de no vendor\b/,
-    follow: /^(and|y|what about|how about|same|lo mismo|and in|and for|y en|y para|y vs|and vs|and the|y el|y la|now|ahora)\b/
-  };
-  function exec(S){
-    switch(S.intent){
-      case 'help': return aHelp();
-      case 'actions': return aActions();
-      case 'summary': return aSummary();
-      case 'hc': return aHC(S.sub);
-      case 'te': return aTE();
-      case 'employee': return aEmployee(S.E);
-      case 'unplanned': return aUnplanned(S.P || { t:'ytd' }, S.bk, S.scope);
-      case 'unused': return aUnused(S.P || { t:'ytd' }, S.bk, S.scope);
-      case 'util': return aUtil(S.E, S.bk);
-      case 'trend': return aTrend(S.E, S.bk);
-      case 'buffer': return aBuffer(S.scope, S.P || { t:'fy' }, S.bk);
-      case 'top': return aTop(S.P || { t:'q', i:RQ }, S.bk, S.dim, S.dir, S.n || 5, S.scope);
-      case 'entity':
-        var pe = premise(S.E, S.P || { t:'q', i:RQ }, S.bk || 'p', S.assert);
-        var re = aEntity(S.E, pe ? pe.P : (S.P || { t:'q', i:RQ }), S.bk || 'p', S.why);
-        if(pe) re.html = pe.note + re.html;
-        return re;
-      case 'total':
-        var pt = premise(TOTAL, S.P || { t:'q', i:RQ }, S.bk || 'p', S.assert);
-        var rt = aTotal(pt ? pt.P : (S.P || { t:'q', i:RQ }), S.bk || 'p');
-        if(pt) rt.html = pt.note + rt.html;
-        return rt;
-      case 'compare': return aCompare(S.list, S.P || { t:'q', i:RQ }, S.bk || 'p');
-      case 'outscope': return aOutScope(S.kind, S.E, S.P, S.bk, S.raw || S.qn);
-      case 'random': return aRandom(S.qn);
-      case 'nv': return aNV(S.scope, S.P || { t:'fy' }, S.bk);
-      case 'nvline': return aNVLine(S.E);
-    }
-    return aFallback(S.qn || '');
-  }
-  function route(raw){
-    var qn = norm(raw);
-    if(!qn) return { intent:'help' };
-    var P = parsePeriod(qn), bk = parseBk(qn), P0 = P, bk0 = bk;
-    // Inside a section, unspecified period / benchmark default to that section's view.
-    if(SECTION){ if(!P && SECTION.P) P = SECTION.P; if(!bk && SECTION.bk) bk = SECTION.bk; }
-    var I = {}; Object.keys(RX).forEach(function(k){ I[k] = RX[k].test(qn); });
-    var isTop = I.top && !I.summary;
-    var found = findEntities(qn, isTop ? null : typeHint(qn));
-    var best = found[0] ? found[0].E : null;
-    var S = { qn:qn, P:P, bk:bk, raw:String(raw || '').toLowerCase() };
-    if(/\d+(\.\d+)?\s?%/.test(S.raw)) I.scenario = true;
-    if(I.menu) return (S.intent = 'menu', S);
-    if(I.help) return (S.intent = 'help', S);
-    if(I.actions && !best) return (S.intent = 'actions', S);
-    var nvScope = found.filter(function(x){ return x.E.type === 'cat' || x.E.type === 'gl'; })[0];
-    if(NV && I.nv && !I.buffer) return (S.intent = 'nv', S.scope = nvScope ? nvScope.E : null, S);
-    if(NV && SECTION && SECTION.id === 'nv' && best && (best.type === 'cat' || best.type === 'gl') && !isTop && !I.compare) return (S.intent = 'nv', S.scope = best, S);
-    var bestNE = best && best.type !== 'employee' ? best : null;
-    if(I.opinion) return (S.intent = 'outscope', S.kind = 'opinion', S.E = bestNE || (CTX && CTX.E) || null, S);
-    if(I.scenario) return (S.intent = 'outscope', S.kind = 'scenario', S.E = bestNE, S);
-    if(I.rec) return (S.intent = 'outscope', S.kind = 'rec', S.E = bestNE, S);
-    if(I.compare || /\b(and|y)\b/.test(qn)){
-      var multi = multiEntities(qn);
-      if(multi.length >= 2) return (S.intent = 'compare', S.list = multi, S);
-    }
-    if(best && best.type === 'nvline' && !isTop) return (S.intent = 'nvline', S.E = best, S);
-    if(best && best.type === 'employee' && !isTop) return (S.intent = 'employee', S.E = best, S);
-    if(I.hcStrong || (I.hcWeak && !best)){
-      if(!(best && (best.type === 'gl' || best.type === 'cat') && !I.hcStrong)){
-        S.intent = 'hc'; S.sub = I.newh ? 'new' : I.tbh ? 'tbh' : null; return S;
-      }
-    }
-    if(I.te && (!best || (best.type === 'cat' && /travel/i.test(best.name)))) return (S.intent = 'te', S);
-    var scope = best && (best.type === 'cat' || best.type === 'gl') ? best : null;
-    if(I.unplanned) return (S.intent = 'unplanned', S.scope = scope, S);
-    if(I.unused) return (S.intent = 'unused', S.scope = scope, S);
-    if(I.buffer) return (S.intent = 'buffer', S.scope = scope, S);
-    if(I.util) return (S.intent = 'util', S.E = best && best.type !== 'employee' ? best : null, S);
-    if(I.trend) return (S.intent = 'trend', S.E = best && best.type !== 'employee' ? best : null, S);
-    if(I.summary && !best) return P ? (S.intent = 'total', S) : (S.intent = 'summary', S);
-    if(isTop && scope && /\bdrivers?\b/.test(qn) && !parseDim(qn)) return (S.intent = 'entity', S.E = scope, S.why = true, S);
-    if(isTop && (!best || scope || parseDim(qn))){
-      S.intent = 'top'; S.dim = parseDim(qn); S.dir = parseDir(qn); S.n = parseN(qn); S.scope = scope;
-      if(!S.dim && !scope && !/\bdrivers?\b/.test(qn) && /\b(vendor|proveedor)/.test(qn)) S.dim = 'vendor';
-      return S;
-    }
-    if(best){ S.intent = 'entity'; S.E = best; S.why = I.why; S.assert = P0 ? null : assertDir(qn); S.alts = found.slice(1).filter(function(x){ return x.s >= found[0].s - 0.3 && x.E.name !== best.name; }).slice(0, 2).map(function(x){ return x.E; }); return S; }
-    // follow-ups: "and Q2?", "y vs forecast?", "same for YTD"
-    var unk = queryTokens(qn);
-    var shortQ = qn.split(' ').length <= 4;
-    if(CTX && FOLLOWABLE[CTX.intent] && (I.follow || ((P0 || bk0) && shortQ)) && !I.summary && !unk.length){
-      var F = {}; Object.keys(CTX).forEach(function(k){ F[k] = CTX[k]; });
-      F.qn = qn; if(P0) F.P = P0; if(bk0) F.bk = bk0;
-      var dir = parseDir(qn); if(dir && F.intent === 'top') F.dir = dir;
-      return F;
-    }
-    if(I.summary) return (S.intent = 'summary', S);
-    if(isTop){ S.intent = 'top'; S.dim = parseDim(qn); S.dir = parseDir(qn); S.n = parseN(qn); return S; }
-    var nTok = qn.split(' ').length;
-    if(RANDOM_TOPIC.test(qn) || (!I.money && !P0 && !bk0 && !I.why && !I.follow && nTok >= 3)){ S.intent = 'random'; return S; }
-    if(unk.length && (I.follow || !I.money)){ S.intent = 'fallback'; return S; }
-    if(I.money || P || bk || I.why){ S.intent = 'total'; S.unk = unk; S.assert = P0 ? null : assertDir(qn); return S; }
-    S.intent = 'fallback';
-    return S;
-  }
-  function answer(raw){
-    var S;
-    try{
-      S = route(raw);
-      if(S.intent === 'menu') return { menu:true };
-      var R = exec(S);
-      if(S.intent === 'total' && S.unk && S.unk.length){
-        R.html = '<p class="fb-dim">I could not find "' + esc(S.unk.join(' ')) + '" among this board\'s categories, accounts, vendors or people, so this is the ' + esc(BU) + ' total.</p>' + R.html;
-      }
-      if(S.intent === 'entity' && S.alts && S.alts.length){
-        R.html += '<p class="fb-dim">Also matched: ' + S.alts.map(function(a){ return esc(a.name) + ' (' + esc(typeLabel(a)) + ')'; }).join(', ') + '.</p>';
-        R.chips = S.alts.map(function(a){ return a.name + ' (' + typeLabel(a).toLowerCase() + ')'; }).concat(R.chips || []).slice(0, 4);
-      }
-      if(S.intent !== 'fallback' && S.intent !== 'help') CTX = S;
-      return R;
-    }catch(err){
-      if(window.console) console.warn('FP&A bot error', err);
-      return { html:'<p>Something went wrong while computing that answer. Try rephrasing, or ask for "help".</p>', chips:['Help'] };
-    }
-  }
-
-  /* ---------------- sections (guided menu) ---------------- */
-  var SECTION = null;
-  function bestCat(P, bk){
-    var l = CATS.map(function(c){ return { c:c, v:ev(c, P, bk).v }; }).sort(function(a, b){ return Math.abs(b.v) - Math.abs(a.v); });
-    return l[0] && Math.abs(l[0].v) >= 1 ? l[0].c : null;
-  }
-  function periodChips(P, bk){
-    var c = bestCat(P, bk);
-    return ['Top 5 unfavorable vendors', 'Top 5 favorable vendors', 'Top 5 unfavorable accounts', c ? 'Why is ' + c.name + ' off ' + (bk === 'f' ? 'forecast' : 'plan') + '?' : null].filter(Boolean);
-  }
-  function aExceptions(){
-    var P = { t:'ytd' };
-    var lines = VROWS.map(function(x){ return withB(rowVal(x.row, P), 'p'); });
-    var unpl = lines.filter(function(x){ return Math.abs(x.p) < 1 && Math.abs(x.w) >= 1; });
-    var unus = lines.filter(function(x){ return Math.abs(x.w) < 1 && x.p >= 1; });
-    var ytd = ev(TOTAL, P, 'p'), fy = ev(TOTAL, { t:'fy' }, 'p');
-    var used = fy.p ? ytd.w / fy.p * 100 : null, elapsed = (RM + 1) / 12 * 100;
-    var h = '<p>Three checks on <b>' + esc(pLabel(P)) + '</b> vs ' + esc(PLAN) + ':</p><ul class="fb-ul">';
-    h += '<li><b>Unplanned spend:</b> ' + unpl.length + ' vendor/account lines with Working but no Plan, totaling <b>' + fm(unpl.reduce(function(a, x){ return a + x.w; }, 0)) + '</b>.</li>';
-    h += '<li><b>Unused budget:</b> ' + unus.length + ' lines with Plan but no Working, <b>' + fm(unus.reduce(function(a, x){ return a + x.p; }, 0)) + '</b> not used so far.</li>';
-    if(used !== null) h += '<li><b>Pacing:</b> ' + used.toFixed(1) + '% of the full-year Plan used vs ' + elapsed.toFixed(0) + '% of the year elapsed (' + (Math.abs(used - elapsed) < 3 ? 'on pace' : used > elapsed ? '<span class="fb-bad">ahead of pace</span>' : '<span class="fb-good">behind pace</span>') + ').</li>';
-    h += '</ul>';
-    return { html:h, chips:['What is not in plan?', 'Budget with no spend', 'Budget utilization', 'Monthly trend'] };
-  }
-  function secNotes(sid){ return notesHtml(boardNotes().filter(function(n){ return n.sid === sid; })); }
-  var PQ = { t:'q', i:RQ }, PF = { t:'fy' };
-  var SECTIONS = [
-    { id:'overview', icon:'ti-layout-dashboard', title:'Overview', sub:'KPIs, drivers and watch items', sid:'sec-overview', P:null, bk:null,
-      scope:'the whole board', hint:'Ask about the overall picture...', intro:aSummary },
-    { id:'qplan', icon:'ti-trending-down', title:QL[RQ] + ' vs Plan', sub:'Quarter variance by category, account and vendor', sid:'sec-qplan', P:PQ, bk:'p',
-      scope:QL[RQ] + ' vs ' + PLAN, hint:'Ask about ' + QL[RQ] + ' vs Plan...', intro:function(){ var R = aTotal(PQ, 'p'); R.html += secNotes('sec-qplan'); R.chips = periodChips(PQ, 'p'); return R; } },
-    { id:'qfcst', icon:'ti-chart-dots-3', title:QL[RQ] + ' vs Forecast', sub:'Quarter variance vs ' + FCST, sid:'sec-qfcst', P:PQ, bk:'f',
-      scope:QL[RQ] + ' vs ' + FCST, hint:'Ask about ' + QL[RQ] + ' vs Forecast...', intro:function(){ var R = aTotal(PQ, 'f'); R.html += secNotes('sec-qfcst'); R.chips = periodChips(PQ, 'f'); return R; } },
-    { id:'fyplan', icon:'ti-calendar-stats', title:'Full year vs Plan', sub:FY + ' outlook vs ' + PLAN, sid:'sec-fyplan', P:PF, bk:'p',
-      scope:'full year vs ' + PLAN, hint:'Ask about the full year vs Plan...', intro:function(){ var R = aTotal(PF, 'p'); R.html += secNotes('sec-fyplan'); R.chips = periodChips(PF, 'p'); return R; } },
-    { id:'fyfcst', icon:'ti-chart-line', title:'Full year vs Forecast', sub:FY + ' outlook vs ' + FCST, sid:'sec-fyfcst', P:PF, bk:'f',
-      scope:'full year vs ' + FCST, hint:'Ask about the full year vs Forecast...', intro:function(){ var R = aTotal(PF, 'f'); R.html += secNotes('sec-fyfcst'); R.chips = periodChips(PF, 'f'); return R; } },
-    { id:'buffer', icon:'ti-arrows-split-2', title:'Real vs projected', sub:'Actuals, buffer (reallocated savings) and projection', sid:null, P:PF, bk:'p',
-      scope:'full year vs ' + PLAN, hint:'Ask about buffer, actuals or projection...', intro:function(){ return aBuffer(null, PF, 'p'); } },
-    { id:'exceptions', icon:'ti-alert-triangle', title:'Exceptions & pacing', sub:'Unplanned spend, unused budget, utilization', sid:null, P:{ t:'ytd' }, bk:'p',
-      scope:'YTD vs ' + PLAN, hint:'Ask about unplanned spend, unused budget...', intro:aExceptions },
-    { id:'hc', icon:'ti-users', title:'Headcount', sub:'Salary Accrued, TBH roles, hires', sid:'sec-hc', P:null, bk:null,
-      scope:null, hint:'Ask about headcount, a TBH or an employee...', intro:function(){ return aHC(null); } },
-    { id:'te', icon:'ti-plane', title:'Travel & Expense', sub:'T&E by month and employee', sid:'sec-te', P:null, bk:null,
-      scope:null, hint:'Ask about T&E or an employee...', intro:aTE },
-    { id:'actions', icon:'ti-checklist', title:'Follow-up actions', sub:'Open items on the board', sid:'sec-actions', P:null, bk:null,
-      scope:null, hint:'Ask anything...', intro:aActions },
-    { id:'free', icon:'ti-message-question', title:'Ask anything', sub:'Free questions across the whole board', sid:null, P:null, bk:null,
-      scope:null, hint:'Ask about a vendor, account, category, quarter...', intro:function(){ var R = aHelp(); return R; } }
-  ];
-
-  if(NV) SECTIONS.splice(6, 0, { id:'nv', icon:'ti-list-details', title:'No Vendor detail', sub:'Line items behind the No Vendor amounts', sid:'sec-nv', P:PF, bk:'p',
-    scope:'full year vs ' + PLAN, hint:'Ask about a No Vendor line item or account...', intro:function(){ return aNV(null, PF, 'p'); } });
-
-  /* ---------------- UI ---------------- */
-  var CSS = ''
-    + '#fpa-bot-root{font-family:inherit}'
-    + '.fb-fab{position:fixed;right:22px;bottom:22px;z-index:690;display:inline-flex;align-items:center;gap:8px;border:none;border-radius:999px;padding:12px 18px;background:linear-gradient(90deg,#4f46e5,#6366f1);color:#fff;font-size:13px;font-weight:800;cursor:pointer;box-shadow:0 8px 24px rgba(79,70,229,.38);transition:transform .15s}'
-    + '.fb-fab:hover{transform:translateY(-2px)}.fb-fab i{font-size:18px}'
-    + '.fb-panel{position:fixed;right:22px;bottom:80px;z-index:700;width:min(440px,calc(100vw - 32px));height:min(660px,calc(100vh - 104px));background:#fff;border:1px solid #e9eef7;border-radius:18px;box-shadow:0 18px 48px rgba(15,23,42,.22);display:none;flex-direction:column;overflow:hidden}'
-    + '.fb-panel.open{display:flex}'
-    + '.fb-head{padding:14px 16px;background:linear-gradient(120deg,#1e2450,#312e81);color:#fff;display:flex;align-items:center;gap:10px}'
-    + '.fb-head .fb-av{width:34px;height:34px;border-radius:10px;background:rgba(255,255,255,.14);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}'
-    + '.fb-face{width:28px;height:28px;display:block;overflow:visible;animation:fb-bob 3.2s ease-in-out infinite}'
-    + '.fb-face .fb-eyes{transform-box:fill-box;transform-origin:center;animation:fb-blink 4.2s infinite}'
-    + '.fb-face .fb-smile{transform-box:fill-box;transform-origin:center top;animation:fb-grin 6.4s ease-in-out infinite}'
-    + '.fb-face .fb-ant{animation:fb-glow 2.4s ease-in-out infinite}'
-    + '@keyframes fb-blink{0%,90%,100%{transform:scaleY(1)}93%{transform:scaleY(.12)}96%{transform:scaleY(1)}}'
-    + '@keyframes fb-grin{0%,55%,100%{transform:scale(1,1)}65%,85%{transform:scale(1.18,1.45)}}'
-    + '@keyframes fb-glow{0%,100%{opacity:.55}50%{opacity:1}}'
-    + '@keyframes fb-bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-1.5px)}}'
-    + '.fb-face .fb-eyes-c,.fb-face .fb-hand{opacity:0;transition:opacity .15s}'
-    + '.fb-face .fb-hand{transform-box:fill-box;transform-origin:70% 100%}'
-    + '.fb-face .fb-ear-r{transition:opacity .15s}.fb-thinking .fb-face .fb-ear-r{opacity:0}'
-    + '.fb-thinking .fb-face{animation:fb-nod .84s ease-in-out infinite}'
-    + '.fb-thinking .fb-face .fb-eyes{opacity:0;animation:none}'
-    + '.fb-thinking .fb-face .fb-eyes-c{opacity:1}'
-    + '.fb-thinking .fb-face .fb-smile{animation:none;transform:scale(1.18,1.45)}'
-    + '.fb-thinking .fb-face .fb-hand{opacity:1;animation:fb-tap .42s ease-in-out infinite}'
-    + '@keyframes fb-tap{0%,100%{transform:translate(0,0) rotate(0)}50%{transform:translate(-.6px,.4px) rotate(-11deg)}}'
-    + '@keyframes fb-nod{0%,100%{transform:rotate(0)}50%{transform:rotate(-4deg)}}'
-    + '.fb-typing{display:flex;align-items:center;gap:4px;color:#64748b;font-size:11.5px;font-style:italic}'
-    + '.fb-typing i{width:6px;height:6px;border-radius:50%;background:#a5b4fc;animation:fb-dot 1s infinite}.fb-typing i:nth-child(2){animation-delay:.15s}.fb-typing i:nth-child(3){animation-delay:.3s}.fb-typing span{margin-left:4px}'
-    + '@keyframes fb-dot{0%,80%,100%{opacity:.35;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}'
-    + '@media (prefers-reduced-motion:reduce){.fb-face,.fb-face *,.fb-typing i{animation:none!important}}'
-    + '.fb-head .fb-tt{font-size:14px;font-weight:800;line-height:1.2}.fb-head .fb-st{font-size:11px;color:#c7d2fe;margin-top:2px}'
-    + '.fb-hbtns{margin-left:auto;display:flex;align-items:center;gap:2px}.fb-clr{font-size:17px!important}'
-    + '.fb-head button{background:transparent;border:none;color:#c7d2fe;font-size:20px;cursor:pointer;padding:2px 6px;border-radius:8px}.fb-head button:hover{background:rgba(255,255,255,.1);color:#fff}'
-    + '.fb-msgs{flex:1;overflow-y:auto;padding:14px;background:#f7f9fd;display:flex;flex-direction:column;gap:10px}'
-    + '.fb-msg{max-width:94%;font-size:12.5px;line-height:1.5;color:#1e293b;border-radius:14px;padding:10px 12px}'
-    + '.fb-msg.bot{background:#fff;border:1px solid #e9eef7;align-self:flex-start;box-shadow:0 2px 8px rgba(15,23,42,.04)}'
-    + '.fb-msg.me{background:linear-gradient(90deg,#4f46e5,#6366f1);color:#fff;align-self:flex-end;border-bottom-right-radius:4px}'
-    + '.fb-msg p{margin:0 0 8px}.fb-msg p:last-child{margin-bottom:0}'
-    + '.fb-h{font-size:13px;font-weight:800;color:#0f172a;margin-bottom:6px}.fb-h small{font-size:10.5px;font-weight:700;color:#94a3b8;margin-left:4px}'
-    + '.fb-sub{font-size:10px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:#94a3b8;margin:12px 0 6px}'
-    + '.fb-t{width:100%;border-collapse:collapse;font-size:11.5px;margin:6px 0 8px}'
-    + '.fb-t th{font-size:10px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:.03em;background:#f1f5fb;padding:6px 7px;text-align:right;border-bottom:1px solid #e9eef7;white-space:nowrap}'
-    + '.fb-t th:first-child{text-align:left}'
-    + '.fb-t td{padding:6px 7px;border-bottom:1px solid #f1f5f9;text-align:right;white-space:nowrap;color:#334155}'
-    + '.fb-t td:first-child{text-align:left;white-space:normal;font-weight:600;color:#0f172a}'
-    + '.fb-t td small{display:block;font-size:10px;font-weight:600;color:#94a3b8}'
-    + '.fb-t.fb-tw{font-size:10.5px;table-layout:auto}.fb-t.fb-tw th{font-size:8.5px;letter-spacing:.02em;padding:5px 4px;white-space:normal;line-height:1.2;vertical-align:bottom}.fb-t.fb-tw td{padding:5px 4px}.fb-t.fb-tw td:first-child{font-size:10.5px;padding-left:5px}'
-    + '.fb-msg.bot{min-width:0;overflow-x:auto}.fb-msg,.fb-chips{flex-shrink:0}'
-    + '.fb-t tr.fb-hl td{background:#eef2ff}.fb-t tr.fb-more td{color:#94a3b8;font-style:italic;text-align:left}'
-    + '.fb-good{color:#16a34a;font-weight:700}.fb-bad{color:#e11d48;font-weight:700}.fb-neu{color:#475569;font-weight:700}'
-    + '.fb-tag{display:inline-block;font-size:10px;font-weight:800;border-radius:999px;padding:1px 8px;margin-left:2px;vertical-align:1px}'
-    + '.fb-tag.fb-good{background:#e8f8ee}.fb-tag.fb-bad{background:#fdeaef}.fb-tag.fb-neu{background:#eaf1ff;color:#2563eb}'
-    + '.fb-dim{color:#64748b;font-size:11.5px}'
-    + '.fb-ul{margin:4px 0 8px 18px;padding:0}.fb-ul li{margin:3px 0}.fb-ul li.fb-done{color:#94a3b8;text-decoration:line-through}'
-    + '.fb-note{background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:7px 9px;margin:6px 0;font-size:11.5px;color:#422006}'
-    + '.fb-note span{display:block;font-size:9.5px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#a16207;margin-bottom:2px}'
-    + '.fb-chips{display:flex;flex-wrap:wrap;gap:6px;align-self:flex-start;max-width:100%}'
-    + '.fb-chip{border:1px solid #c7d2fe;background:#fff;color:#4338ca;border-radius:999px;padding:5px 10px;font-size:11px;font-weight:700;cursor:pointer;text-align:left}'
-    + '.fb-chip:hover{background:#eef2ff}'
-    + '.fb-in{display:flex;gap:8px;padding:10px;border-top:1px solid #e9eef7;background:#fff}'
-    + '.fb-in input{flex:1;border:1px solid #cbd5e1;border-radius:10px;padding:10px 12px;font-size:12.5px;font-family:inherit;color:#0f172a;min-width:0}'
-    + '.fb-in input:focus{outline:2px solid #c7d2fe;border-color:transparent}'
-    + '.fb-in button{border:none;border-radius:10px;padding:0 14px;background:linear-gradient(90deg,#4f46e5,#6366f1);color:#fff;font-size:16px;cursor:pointer}'
-    + '.fb-ctx{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 12px;border-top:1px solid #e9eef7;background:#f8faff;font-size:11.5px;color:#475569}'
-    + '.fb-ctx-l{display:flex;align-items:center;gap:6px;min-width:0}.fb-ctx-l i{color:#6366f1;font-size:14px}.fb-ctx-t{font-weight:800;color:#312e81;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
-    + '.fb-ctx-btn{display:inline-flex;align-items:center;gap:5px;flex-shrink:0;border:1px solid #c7d2fe;background:#fff;color:#4338ca;border-radius:8px;padding:4px 9px;font-size:11px;font-weight:800;cursor:pointer;font-family:inherit}.fb-ctx-btn:hover{background:#eef2ff}'
-    + '.fb-menu{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 0}'
-    + '.fb-card{display:flex;gap:9px;align-items:flex-start;text-align:left;border:1px solid #e2e8f0;background:#fafbff;border-radius:12px;padding:10px;cursor:pointer;font-family:inherit;transition:.12s}'
-    + '.fb-card:hover{border-color:#818cf8;background:#eef2ff}.fb-card.on{border-color:#4f46e5;background:#eef2ff;box-shadow:inset 0 0 0 1px #4f46e5}.fb-menu .fb-card:last-child:nth-child(odd){grid-column:1 / -1}'
-    + '.fb-t.fb-bridge td:first-child{font-weight:600}.fb-t tr.fb-bufrow td{background:#f8fafc}.fb-t tr.fb-bufrow td:first-child{font-style:italic}'
-    + '.fb-note-q{background:#eef2ff;border:1px solid #c7d2fe;border-radius:10px;padding:7px 9px;font-size:11.5px;color:#312e81}'
-    + '.fb-t tr.fb-tot td{font-weight:800;border-top:1.5px solid #e2e8f0}'
-    + '.fb-card i{font-size:18px;color:#4f46e5;margin-top:1px;flex-shrink:0}.fb-card b{display:block;font-size:12px;color:#0f172a;line-height:1.25}.fb-card small{display:block;font-size:10.5px;color:#64748b;margin-top:3px;line-height:1.35}'
-    + '.fb-sec-tag{display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#4338ca;background:#eef2ff;border-radius:999px;padding:3px 9px;margin-bottom:8px}'
-    + '.fb-jump{display:inline-flex;align-items:center;gap:5px;border:none;background:none;color:#4f46e5;font-weight:800;font-size:11.5px;cursor:pointer;padding:0;margin:2px 0 8px;font-family:inherit}.fb-jump:hover{text-decoration:underline}'
-    + '.fb-modal{position:absolute;inset:0;z-index:5;background:rgba(15,23,42,.38);display:flex;align-items:center;justify-content:center;padding:20px}.fb-modal[hidden]{display:none}'
-    + '.fb-mbox{background:#fff;border-radius:16px;padding:20px 18px 16px;max-width:320px;width:100%;box-shadow:0 18px 40px rgba(15,23,42,.25);text-align:center}'
-    + '.fb-mface{width:64px;height:64px;border-radius:18px;background:linear-gradient(120deg,#1e2450,#312e81);display:flex;align-items:center;justify-content:center;margin:0 auto 12px;box-shadow:0 6px 18px rgba(49,46,129,.28)}.fb-mface .fb-face{width:46px;height:46px}'
-    + '.fb-face .fb-wave{opacity:0;transition:opacity .15s;transform-box:fill-box;transform-origin:40% 100%}'
-    + '.fb-bye .fb-face .fb-wave{opacity:1;animation:fb-wave .38s ease-in-out infinite alternate}'
-    + '.fb-bye .fb-face .fb-eyes{opacity:0;animation:none}.fb-bye .fb-face .fb-eyes-c{opacity:1}.fb-bye .fb-face .fb-ear-r{opacity:0}'
-    + '.fb-bye .fb-face .fb-smile{animation:none;transform:scale(1.18,1.45)}'
-    + '.fb-bye .fb-mact{display:none}.fb-bye .fb-mt{font-size:16px}'
-    + '@keyframes fb-wave{from{transform:rotate(-14deg)}to{transform:rotate(16deg)}}'
-    + '.fb-mi{width:42px;height:42px;border-radius:12px;background:#fff7ed;color:#ea580c;display:flex;align-items:center;justify-content:center;font-size:22px;margin:0 auto 10px}'
-    + '.fb-mt{font-size:14px;font-weight:800;color:#0f172a;margin-bottom:6px}.fb-mp{font-size:12px;line-height:1.5;color:#475569;margin:0 0 16px}'
-    + '.fb-mact{display:flex;gap:8px;justify-content:center;align-items:center}'
-    + '.fb-mbtn{border-radius:10px;padding:9px 14px!important;font-size:12px!important;line-height:1.2!important;height:auto!important;white-space:nowrap;font-weight:800;cursor:pointer;font-family:inherit}'
-    + '.fb-mbtn.fb-mb-sec{border:1px solid #cbd5e1;background:#fff;color:#334155}.fb-mbtn.fb-mb-sec:hover{background:#f1f5f9}'
-    + '.fb-mbtn.fb-mb-pri{border:1px solid transparent;background:linear-gradient(90deg,#4f46e5,#6366f1);color:#fff}'
-    + '.toast{right:auto!important;left:50%;transform:translate(-50%,10px)!important}.toast.show{transform:translate(-50%,0)!important}'
-    + '@media print{#fpa-bot-root{display:none!important}}';
-  var st = d.createElement('style'); st.id = 'fpa-bot-style'; st.textContent = CSS; (d.head || d.documentElement).appendChild(st);
-
-  var FACE = '<svg class="fb-face" viewBox="0 0 32 32" aria-hidden="true"><line x1="16" y1="3.5" x2="16" y2="7.5" stroke="#c7d2fe" stroke-width="1.6" stroke-linecap="round"/><circle class="fb-ant" cx="16" cy="3" r="2" fill="#a5f3fc"/><rect x="5" y="7.5" width="22" height="19" rx="7" fill="#eef2ff"/><rect x="2.6" y="14" width="2.6" height="6" rx="1.3" fill="#c7d2fe"/><rect class="fb-ear-r" x="26.8" y="14" width="2.6" height="6" rx="1.3" fill="#c7d2fe"/><g class="fb-eyes"><ellipse cx="12" cy="15.5" rx="2.2" ry="2.6" fill="#312e81"/><ellipse cx="20" cy="15.5" rx="2.2" ry="2.6" fill="#312e81"/><circle cx="12.8" cy="14.6" r=".7" fill="#fff"/><circle cx="20.8" cy="14.6" r=".7" fill="#fff"/></g><circle cx="9.4" cy="20.2" r="1.5" fill="#fda4af" opacity=".75"/><circle cx="22.6" cy="20.2" r="1.5" fill="#fda4af" opacity=".75"/><path class="fb-smile" d="M12 20.6 Q16 24.6 20 20.6" fill="none" stroke="#312e81" stroke-width="1.8" stroke-linecap="round"/><g class="fb-eyes-c" fill="none" stroke="#312e81" stroke-width="1.7" stroke-linecap="round"><path d="M9.8 16.4 Q12 13.9 14.2 16.4"/><path d="M17.8 16.4 Q20 13.9 22.2 16.4"/></g><g class="fb-hand"><rect x="29.4" y="15.2" width="3.4" height="9" rx="1.7" fill="#c7d2fe" stroke="#312e81" stroke-width=".7"/><rect x="24.6" y="10.6" width="6" height="2.6" rx="1.3" fill="#fef3c7" stroke="#312e81" stroke-width=".7" transform="rotate(28 30.6 11.9)"/><circle cx="31.1" cy="14.4" r="3.4" fill="#fef3c7" stroke="#312e81" stroke-width=".7"/><path d="M29.6 15.6 Q31.1 16.6 32.6 15.6" fill="none" stroke="#312e81" stroke-width=".55" stroke-linecap="round"/></g><g class="fb-wave"><rect x="28.9" y="9" width="3.4" height="12.5" rx="1.7" fill="#c7d2fe" stroke="#312e81" stroke-width=".7" transform="rotate(14 30.6 21.5)"/><path d="M29.2 4.6 L28.7 1.4 M31.3 3.9 L31.3 0.4 M33.4 4.6 L34 1.4 M28.2 7.6 L26.3 6.4" stroke="#312e81" stroke-width="1.5" stroke-linecap="round"/><path d="M29.2 4.6 L28.7 1.4 M31.3 3.9 L31.3 0.4 M33.4 4.6 L34 1.4 M28.2 7.6 L26.3 6.4" stroke="#fef3c7" stroke-width=".7" stroke-linecap="round"/><circle cx="31.3" cy="7.2" r="3.7" fill="#fef3c7" stroke="#312e81" stroke-width=".7"/></g></svg>';
-  var root = d.createElement('div'); root.id = 'fpa-bot-root';
-  root.innerHTML = '<button type="button" class="fb-fab" aria-label="Ask Felipe, the FP&amp;A analyst"><i class="ti ti-message-chatbot"></i> Ask FP&amp;A</button>'
-    + '<div class="fb-panel" role="dialog" aria-label="Felipe, FP&amp;A analyst">'
-    + '<div class="fb-head"><div class="fb-av">' + FACE + '</div><div><div class="fb-tt">Felipe Analyst</div><div class="fb-st">' + esc(BU) + ' · ' + esc(META.month || '') + ' ' + esc(FY) + ' · ' + esc(QL[RQ]) + '</div></div><div class="fb-hbtns"><button type="button" class="fb-clr" title="Clear chat" aria-label="Clear chat"><i class="ti ti-eraser"></i></button><button type="button" class="fb-x" title="Close" aria-label="Close">&times;</button></div></div>'
-    + '<div class="fb-msgs"></div>'
-    + '<div class="fb-ctx"><span class="fb-ctx-l"><i class="ti ti-target-arrow"></i><span>Section:</span><span class="fb-ctx-t">Whole board</span></span><button type="button" class="fb-ctx-btn"><i class="ti ti-layout-grid"></i> Sections</button></div>'
-    + '<div class="fb-modal" hidden><div class="fb-mbox"><div class="fb-mface">' + FACE + '</div><div class="fb-mt"></div><p class="fb-mp"></p><div class="fb-mact"><button type="button" class="fb-mbtn fb-mb-sec"></button><button type="button" class="fb-mbtn fb-mb-pri"></button></div></div></div>'
-    + '<form class="fb-in"><input type="text" placeholder="Ask about a vendor, account, category, quarter..." autocomplete="off" /><button type="submit" aria-label="Send"><i class="ti ti-send"></i></button></form>'
-    + '</div>';
-  d.body.appendChild(root);
-  // A board saved from an open window carries a stale copy of the bot after this script; drop it once parsing ends.
-  function dedupe(){
-    d.querySelectorAll('#fpa-bot-root').forEach(function(el){ if(el !== root && el.parentNode) el.parentNode.removeChild(el); });
-    d.querySelectorAll('#fpa-bot-style').forEach(function(el){ if(el !== st && el.parentNode) el.parentNode.removeChild(el); });
-  }
-  if(d.readyState === 'loading') d.addEventListener('DOMContentLoaded', dedupe); else dedupe();
-  var fab = root.querySelector('.fb-fab'), panel = root.querySelector('.fb-panel'), msgs = root.querySelector('.fb-msgs');
-  var form = root.querySelector('.fb-in'), input = form.querySelector('input'), started = false;
-
-  function addMsg(who, html, chips){
-    var m = d.createElement('div'); m.className = 'fb-msg ' + who;
-    if(who === 'me') m.textContent = html; else m.innerHTML = html;
-    msgs.appendChild(m);
-    var old = msgs.querySelectorAll('.fb-chips'); old.forEach(function(c){ c.parentNode.removeChild(c); });
-    if(chips && chips.length){
-      var c = d.createElement('div'); c.className = 'fb-chips';
-      chips.forEach(function(t){ var b = d.createElement('button'); b.type = 'button'; b.className = 'fb-chip'; b.textContent = t; c.appendChild(b); });
-      msgs.appendChild(c);
-    }
-    if(who === 'me') msgs.scrollTop = msgs.scrollHeight; else m.scrollIntoView({ block:'start' });
-  }
-  var ctxT = root.querySelector('.fb-ctx-t'), DEF_HINT = input.placeholder;
-  function updateCtx(){
-    ctxT.textContent = SECTION ? SECTION.title : 'Whole board';
-    input.placeholder = SECTION ? SECTION.hint : DEF_HINT;
-  }
-  function menuHtml(){
-    return '<div class="fb-h">What do you want to review?</div><div class="fb-menu">'
-      + SECTIONS.map(function(sx){
-          var on = !!(SECTION && SECTION.id === sx.id);
-          return '<button type="button" class="fb-card' + (on ? ' on' : '') + '" data-sec="' + sx.id + '"><i class="ti ' + sx.icon + '"></i><span><b>' + esc(sx.title) + '</b><small>' + esc(sx.sub) + '</small></span></button>';
-        }).join('')
-      + '</div><p class="fb-dim">Come back here anytime with <b>Sections</b> below or by typing <b>menu</b>.</p>';
-  }
-  function showMenu(){ addMsg('bot', menuHtml(), null); }
-  // "Thinking" beat: Felipe closes his eyes, smiles and taps his head before answering.
-  var THINK_MS = 750, thinkTok = 0, busy = false;
-  function think(fn){
-    var tok = ++thinkTok; busy = true; root.classList.add('fb-thinking');
-    var ty = d.createElement('div'); ty.className = 'fb-msg bot fb-typing';
-    ty.innerHTML = '<i></i><i></i><i></i><span>Felipe is thinking...</span>';
-    msgs.appendChild(ty); msgs.scrollTop = msgs.scrollHeight;
-    setTimeout(function(){
-      if(ty.parentNode) ty.parentNode.removeChild(ty);
-      if(tok !== thinkTok) return;
-      root.classList.remove('fb-thinking'); busy = false; fn();
-    }, THINK_MS);
-  }
-  function enterSection(id){
-    var sx = SECTIONS.filter(function(x){ return x.id === id; })[0]; if(!sx) return;
-    SECTION = sx.id === 'free' ? null : sx; CTX = null; updateCtx();
-    addMsg('me', '→ ' + sx.title);
-    think(function(){ showSection(sx); });
-  }
-  function showSection(sx){
-    var R;
-    try{ R = sx.intro(); }catch(err){ if(window.console) console.warn('FP&A bot error', err); R = { html:'<p>Could not build this section.</p>', chips:[] }; }
-    var html = '<div class="fb-sec-tag"><i class="ti ' + sx.icon + '"></i> ' + esc(sx.title) + '</div>' + R.html;
-    if(sx.sid && d.getElementById(sx.sid)) html += '<button type="button" class="fb-jump" data-jump="' + sx.sid + '"><i class="ti ti-arrow-up-right"></i> View this section on the board</button>';
-    if(sx.scope) html += '<p class="fb-dim">Questions you type now default to <b>' + esc(sx.scope) + '</b> unless you name another period or benchmark.</p>';
-    addMsg('bot', html, R.chips);
-    setTimeout(function(){ input.focus(); }, 30);
-  }
-  function ask(q){
-    q = String(q || '').trim(); if(!q || busy) return;
-    addMsg('me', q);
-    think(function(){
-      var R = answer(q);
-      if(R.menu){ showMenu(); return; }
-      addMsg('bot', R.html, R.chips);
-    });
-  }
-  function open(){
-    panel.classList.add('open'); fab.style.display = 'none';
-    if(!started){
-      started = true;
-      addMsg('bot', '<p>Hi, I\'m <b>Felipe</b>, the FP&amp;A analyst for the <b>' + esc(BU) + ' ' + esc(META.month || '') + ' ' + esc(FY) + '</b> board. I compute every answer from this board\'s feeds and comments. I don\'t use an AI model and nothing leaves your browser.</p><p class="fb-dim">Pick a section to focus on, or just type a question about any category, GL account, vendor, month, quarter, YTD or full year.</p>', null);
-      showMenu();
-    }
-    setTimeout(function(){ input.focus(); }, 30);
-  }
-  function hide(){ panel.classList.remove('open'); fab.style.display = ''; }
-  function reset(){
-    thinkTok++; busy = false; root.classList.remove('fb-thinking');
-    msgs.innerHTML = ''; started = false; SECTION = null; CTX = null; input.value = ''; updateCtx();
-  }
-  function hasHistory(){ return !!msgs.querySelector('.fb-msg.me'); }
-  var modal = root.querySelector('.fb-modal'), modalOk = null;
-  var byeTimer = null;
-  function confirmBox(title, text, okLabel, onOk, cancelLabel){
-    modal.classList.remove('fb-bye');
-    modal.querySelector('.fb-mt').textContent = title;
-    modal.querySelector('.fb-mp').textContent = text;
-    modal.querySelector('.fb-mbtn.fb-mb-pri').textContent = okLabel;
-    modal.querySelector('.fb-mbtn.fb-mb-sec').textContent = cancelLabel || 'Cancel';
-    modalOk = onOk; modal.hidden = false;
-    modal.querySelector('.fb-mbtn.fb-mb-sec').focus();
-  }
-  function closeModal(){ if(byeTimer) return; modal.hidden = true; modalOk = null; modal.classList.remove('fb-bye'); }
-  // Felipe waves goodbye, then the session closes and is cleared.
-  function goodbye(){
-    modal.classList.add('fb-bye');
-    modal.querySelector('.fb-mt').textContent = 'Goodbye!';
-    modal.querySelector('.fb-mp').textContent = 'Thanks for stopping by. See you at the next close.';
-    modal.hidden = false;
-    byeTimer = setTimeout(function(){
-      byeTimer = null; reset(); hide();
-      modal.hidden = true; modalOk = null; modal.classList.remove('fb-bye');
-    }, 1600);
-    return true;
-  }
-  modal.querySelector('.fb-mbtn.fb-mb-sec').addEventListener('click', closeModal);
-  modal.querySelector('.fb-mbtn.fb-mb-pri').addEventListener('click', function(){ var f = modalOk; modalOk = null; var keep = f ? f() : false; if(!keep) closeModal(); });
-  modal.addEventListener('click', function(e){ if(e.target === modal && !byeTimer) closeModal(); });
-  // Closing ends the chat session: history is cleared (with a warning if there is any).
-  function close(){
-    if(byeTimer) return;
-    if(!hasHistory()){ reset(); hide(); return; }
-    confirmBox('Close our session?', 'Heads up: if we close it, I\'ll clear our question history and we\'ll start fresh next time.', 'Close & clear', goodbye, 'Keep chatting');
-  }
-  function clearChat(){
-    if(!hasHistory()){ reset(); open(); return; }
-    confirmBox('Start over?', 'I\'ll wipe our conversation and take you back to the sections menu.', 'Clear chat', function(){ reset(); open(); }, 'Cancel');
-  }
-  fab.addEventListener('click', open);
-  root.querySelector('.fb-x').addEventListener('click', close);
-  root.querySelector('.fb-clr').addEventListener('click', clearChat);
-  form.addEventListener('submit', function(e){ e.preventDefault(); if(busy) return; var q = input.value; input.value = ''; ask(q); });
-  msgs.addEventListener('click', function(e){
-    if(!e.target.closest) return;
-    var b = e.target.closest('.fb-chip'); if(b){ ask(b.textContent); return; }
-    if(busy) return;
-    var c = e.target.closest('[data-sec]'); if(c){ enterSection(c.getAttribute('data-sec')); return; }
-    var j = e.target.closest('[data-jump]'); if(j){ var el = d.getElementById(j.getAttribute('data-jump')); if(el) window.scrollTo({ top:el.getBoundingClientRect().top + window.pageYOffset - 20, behavior:'smooth' }); }
-  });
-  root.querySelector('.fb-ctx-btn').addEventListener('click', showMenu);
-  panel.addEventListener('keydown', function(e){ if(e.key === 'Escape'){ if(!modal.hidden) closeModal(); else close(); } });
-
-  var api = { ask:answer, open:open, close:close, clear:clearChat, section:enterSection, menu:showMenu };
-  try{ window.__fpaBot = api; }catch(e){}
-  return api;
+(function(){
+Chart.register(ChartDataLabels);
+const state = {
+files: { quarter:null, year:null, hc:null, te:null, opex:null, nv:null },
+model: null,
+edits: {},
+boardCount: 1,
+boards: [],          // per-board file sets: [{quarter,year,hc,te,opex,nv}, ...]
+generated: [],       // built standalone boards: [{title, subtitle, fileBase, html}, ...]
+openedWindows: new Map() // open individual board windows keyed by board index
+};
+const chartRefs = {};
+let REVIEW_MONTH_IDX = -1, REVIEW_Q_IDX = -1;
+let CURRENT_NV = null; // No Vendor line items of the board being rendered
+const monthOrder = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const fiscalOrder = ['Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec','Jan'];
+const dom = {
+budgetUtilNav: document.getElementById('budget-util-nav'),
+buildBtn: document.getElementById('build-btn'),
+resetBtn: document.getElementById('reset-btn'),
+backNav: document.getElementById('back-nav'),
+homeNav: document.getElementById('home-nav'),
+errors: document.getElementById('build-errors'),
+root: document.getElementById('dashboard-root'),
+sidebarFooter: document.getElementById('sidebar-footer'),
+boardCountSeg: document.getElementById('board-count-seg'),
+boardGroups: document.getElementById('board-groups'),
+launcher: document.getElementById('launcher')
+};
+const FEED_DEFS = [
+{ key:'quarter', title:'QUARTER', sub:'Quarterly OPEX feed' },
+{ key:'year',    title:'YEAR',    sub:'Full-year OPEX feed' },
+{ key:'hc',      title:'HC',      sub:'Headcount feed' },
+{ key:'te',      title:'T&E',     sub:'Travel & expense feed' },
+{ key:'opex',    title:'OPEX',    sub:'OPEX Feed (optional)' },
+{ key:'nv',      title:'NO VENDOR', sub:'No Vendor line items (optional)' }
+];
+// ---------- Dynamic multi-board upload groups ----------
+function emptyFiles(){ return { quarter:null, year:null, hc:null, te:null, opex:null, nv:null }; }
+function ensureBoards(count){
+while(state.boards.length < count) state.boards.push(emptyFiles());
+state.boards.length = count;
 }
+function boardGroupHtml(boardIdx, single){
+const cards = FEED_DEFS.map(def => {
+const id = `b${boardIdx}-${def.key}-file`;
+const nameId = `b${boardIdx}-${def.key}-name`;
+return `<label class="upload-card" for="${id}">
+<div class="upload-icon"><i class="ti ti-file-spreadsheet"></i></div>
+<div class="upload-title">${def.title}</div>
+<div class="upload-sub">${def.sub}</div>
+<div class="upload-name" id="${nameId}">Choose file</div>
+<input type="file" id="${id}" accept=".xlsx,.xls" hidden data-board="${boardIdx}" data-feed="${def.key}" />
+</label>`;
+}).join('');
+const legend = single
+? ''
+: `<div class="board-legend"><span class="bg-num">Board ${boardIdx+1}</span><span class="bg-tag" id="bg-tag-${boardIdx}">Awaiting Quarter &amp; Year</span></div>`;
+return `<div class="board-group${single?' single':''}" data-board="${boardIdx}">${legend}<div class="upload-grid">${cards}</div></div>`;
+}
+function renderBoardGroups(){
+const count = state.boardCount;
+ensureBoards(count);
+const single = count === 1;
+dom.boardGroups.innerHTML = state.boards.map((_, i) => boardGroupHtml(i, single)).join('');
+dom.boardGroups.querySelectorAll('input[type="file"]').forEach(input => {
+input.addEventListener('change', onFeedChange);
+});
+// Re-hydrate labels from any retained state.
+state.boards.forEach((files, i) => {
+FEED_DEFS.forEach(def => {
+const f = files[def.key];
+const label = document.getElementById(`b${i}-${def.key}-name`);
+if(label) label.textContent = f ? f.name : 'Choose file';
+const input = document.getElementById(`b${i}-${def.key}-file`);
+if(input) input.closest('.upload-card').classList.toggle('loaded', !!f);
+});
+updateBoardTag(i);
+});
+updateBuildButton();
+}
+function onFeedChange(e){
+const input = e.target;
+const boardIdx = Number(input.dataset.board);
+const feed = input.dataset.feed;
+const file = input.files[0] || null;
+if(!state.boards[boardIdx]) state.boards[boardIdx] = emptyFiles();
+state.boards[boardIdx][feed] = file;
+const label = document.getElementById(`b${boardIdx}-${feed}-name`);
+if(label) label.textContent = file ? file.name : 'Choose file';
+input.closest('.upload-card').classList.toggle('loaded', !!file);
+updateBoardTag(boardIdx);
+updateBuildButton();
+}
+function updateBoardTag(boardIdx){
+const tag = document.getElementById(`bg-tag-${boardIdx}`);
+if(!tag) return;
+const files = state.boards[boardIdx] || {};
+if(files.quarter && files.year){
+let meta = null;
+try{ meta = parseMeta(files.quarter.name); }catch(e){}
+tag.textContent = meta ? `${meta.dashboardCode} · ${meta.monthToken} ${meta.fyToken}` : 'Ready';
+tag.classList.add('ready');
+} else {
+tag.textContent = 'Awaiting Quarter & Year';
+tag.classList.remove('ready');
+}
+}
+function setBoardCount(count){
+state.boardCount = count;
+if(dom.boardCountSeg){
+dom.boardCountSeg.querySelectorAll('.bcs-btn').forEach(b => b.classList.toggle('active', Number(b.dataset.count) === count));
+}
+if(dom.launcher){ dom.launcher.classList.add('hidden'); dom.launcher.innerHTML = ''; }
+state.generated = [];
+renderBoardGroups();
+}
+if(dom.boardCountSeg){
+dom.boardCountSeg.querySelectorAll('.bcs-btn').forEach(btn => {
+btn.addEventListener('click', () => setBoardCount(Number(btn.dataset.count)));
+});
+}
+renderBoardGroups();
+document.getElementById('save-nav').addEventListener('click', saveState);
+document.getElementById('download-nav').addEventListener('click', downloadHtml);
+const pdfNav = document.getElementById('download-pdf-nav');
+if(pdfNav) pdfNav.addEventListener('click', downloadPdf);
+if(dom.backNav) dom.backNav.addEventListener('click', backToWorkspace);
+dom.resetBtn.addEventListener('click', resetAll);
+dom.buildBtn.addEventListener('click', onGenerate);
+document.querySelectorAll('aside nav ul li[data-nav]').forEach(li => {
+li.addEventListener('click', () => navTo(li.dataset.nav, li));
+});
+if(dom.budgetUtilNav) dom.budgetUtilNav.addEventListener('click', openBudgetUtilization);
+function updateBuildButton(){
+ensureBoards(state.boardCount);
+const ready = state.boards.length > 0 && state.boards.every(f => f && f.quarter && f.year);
+dom.buildBtn.disabled = !ready;
+if(dom.buildBtn){
+const lbl = state.boardCount > 1 ? `Generate ${state.boardCount} Boards` : 'Generate Board';
+dom.buildBtn.innerHTML = `<i class="ti ti-wand"></i> ${lbl}`;
+}
+}
+function showError(msg){ dom.errors.textContent = msg || ''; }
+function toast(msg){
+let t = document.getElementById('toast');
+if(!t){ t = document.createElement('div'); t.id='toast'; t.className='toast'; document.body.appendChild(t); }
+t.textContent = msg; t.classList.add('show');
+setTimeout(() => t.classList.remove('show'), 1800);
+}
+function resetAll(){
+unmountAnalystBot();
+state.model = null;
+state.edits = {};
+state.files = { quarter:null, year:null, hc:null, te:null, opex:null, nv:null };
+state.boards = [];
+state.generated = [];
+state.openedWindows.clear();
+dom.root.innerHTML = '';
+dom.root.classList.add('hidden');
+if(dom.backNav) dom.backNav.classList.add('hidden');
+if(dom.homeNav) dom.homeNav.classList.remove('hidden');
+if(dom.budgetUtilNav) dom.budgetUtilNav.classList.add('hidden');
+if(dom.launcher){ dom.launcher.classList.add('hidden'); dom.launcher.innerHTML = ''; }
+showError('');
+document.getElementById('upload-shell').classList.remove('hidden');
+dom.sidebarFooter.textContent = 'Upload Quarter and Year feeds to generate a board (HC, T&E, OPEX and No Vendor optional).';
+document.querySelectorAll('aside nav ul li').forEach((li, idx) => li.classList.toggle('active', idx===0));
+setBoardCount(1);
+updateBuildButton();
+}
+function backToWorkspace(){
+unmountAnalystBot();
+document.getElementById('upload-shell').classList.remove('hidden');
+dom.root.classList.add('hidden');
+if(dom.backNav) dom.backNav.classList.add('hidden');
+if(dom.homeNav) dom.homeNav.classList.remove('hidden');
+if(dom.budgetUtilNav) dom.budgetUtilNav.classList.add('hidden');
+showError('');
+document.querySelectorAll('aside nav ul li').forEach((li, idx) => li.classList.toggle('active', idx===0));
+window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+async function buildDashboard(files){
+try{
+showError('');
+dom.buildBtn.disabled = true;
+dom.buildBtn.innerHTML = '<i class="ti ti-loader-2"></i> Building...';
+const parsed = await parseFiles(files || state.boards[0] || state.files);
+const model = deriveModel(parsed);
+state.model = model;
+renderDashboard(model);
+restoreSavedState();
+document.getElementById('upload-shell').classList.add('hidden');
+dom.root.classList.remove('hidden');
+requestAnimationFrame(function(){ document.querySelectorAll('#dashboard-root textarea').forEach(autoResize); });
+if(dom.backNav) dom.backNav.classList.remove('hidden');
+if(dom.homeNav) dom.homeNav.classList.add('hidden');
+if(dom.budgetUtilNav) dom.budgetUtilNav.classList.toggle('hidden', !model.opex);
+dom.sidebarFooter.textContent = model.meta.badgeLabel;
+}catch(err){
+console.error(err);
+showError(err.message || 'Could not build the dashboard from the uploaded feeds.');
+}finally{
+dom.buildBtn.disabled = false;
+dom.buildBtn.innerHTML = '<i class="ti ti-wand"></i> Generate Board';
+}
+}
+async function parseFiles(files){
+const [quarterWb, yearWb, hcWb, teWb, opexWb, nvWb] = await Promise.all([
+readWorkbook(files.quarter),
+readWorkbook(files.year),
+files.hc ? readWorkbook(files.hc) : Promise.resolve(null),
+files.te ? readWorkbook(files.te) : Promise.resolve(null),
+files.opex ? readWorkbook(files.opex) : Promise.resolve(null),
+files.nv ? readWorkbook(files.nv) : Promise.resolve(null)
+]);
+const meta = parseMeta(files.quarter.name);
+const opexMeta = files.opex ? parseOpexMeta(files.opex.name) : null;
+return {
+meta,
+quarter: parseQuarterFeed(quarterWb),
+year: parseYearFeed(yearWb, meta),
+hc: hcWb ? parseHcFeed(hcWb) : null,
+te: teWb ? parseTeFeed(teWb) : null,
+opex: opexWb ? parseOpexFeed(opexWb, opexMeta) : null,
+nv: nvWb ? parseNoVendorFeed(nvWb, files.nv.name) : null
+};
+}
+function readWorkbook(file){
+return new Promise((resolve, reject) => {
+const reader = new FileReader();
+reader.onload = e => {
+try{
+const wb = XLSX.read(new Uint8Array(e.target.result), { type:'array' });
+const ws = wb.Sheets[wb.SheetNames[0]];
+const rows = XLSX.utils.sheet_to_json(ws, { header:1, defval:'' });
+resolve({ workbook: wb, sheet: ws, rows });
+}catch(err){ reject(err); }
+};
+reader.onerror = reject;
+reader.readAsArrayBuffer(file);
+});
+}
+function parseMeta(filename){
+const cleaned = filename.replace(/\.xlsx?$/i,'');
+const fyMatch = cleaned.match(/(FY\d{2})/i);
+const monthMatch = cleaned.match(/(?:FY\d{2}[_ -]?)([A-Za-z]{3,9})/i);
+const beforeFeed = cleaned.match(/(?:QUARTER|YEAR|HC|TE)[_ -]+(.+?)[_ -]*Feed/i);
+let dashboardCode = beforeFeed ? beforeFeed[1].replace(/[_]+/g,' ').replace(/\s+/g,' ').trim() : 'BvA';
+if(/^\d+\s*-\s*.+$/.test(dashboardCode)){
+dashboardCode = dashboardCode.replace(/^\d+\s*-\s*/, '').trim();
+}
+dashboardCode = dashboardCode.replace(/\s*Feed$/i,'').trim();
+return {
+dashboardCode,
+fyToken: fyMatch ? fyMatch[1].toUpperCase() : 'FY',
+monthToken: monthMatch ? normalizeMonth(monthMatch[1]) : 'Month',
+preparedBy: 'Monty'
+};
+}
+function normalizeMonth(str){
+const short = String(str||'').slice(0,3).toLowerCase();
+const match = monthOrder.find(m => m.toLowerCase() === short);
+return match || str;
+}
+function v(x){
+if(x === null || x === undefined || x === '') return 0;
+if(typeof x === 'number') return x;
+const s = String(x).replace(/[$,]/g,'').trim();
+if(!s) return 0;
+if(/^\((.*)\)$/.test(s)) return -Number(RegExp.$1);
+const n = Number(s);
+return Number.isFinite(n) ? n : 0;
+}
+// Sum three consecutive month cells (a quarter block stores 3 months per metric).
+function sum3(row, start){ return v(row[start]) + v(row[start+1]) + v(row[start+2]); }
+function fmtK(n){
+if(!Number.isFinite(n) || n === 0) return '—';
+const rounded = Math.round(n / 1000);
+if(rounded === 0) return '$0K';
+const abs = Math.abs(rounded).toLocaleString('en-US');
+if(rounded > 0) return '+$' + abs + 'K';
+return '-$' + abs + 'K';
+}
+function fmtKplain(n){
+if(!Number.isFinite(n) || n === 0) return '—';
+const rounded = Math.round(n / 1000);
+if(rounded === 0) return '$0K';
+const abs = Math.abs(rounded).toLocaleString('en-US');
+return rounded < 0 ? '($' + abs + 'K)' : '$' + abs + 'K';
+}
+function isZeroK(n){ return !n || Math.round(n / 1000) === 0; }
+function varClass(n){
+if(isZeroK(n)) return 'var-neu';
+return n < 0 ? 'var-fav' : 'var-unfav';
+}
+function varianceBadge(n){
+if(isZeroK(n)) return '<span class="badge b-plan">PLAN</span>';
+return n < 0 ? '<span class="badge b-fav">↓ FAVORABLE</span>' : '<span class="badge b-unfav">↑ UNFAVORABLE</span>';
+}
+function classifyRow(label){
+const txt = String(label||'').trim();
+if(!txt) return 'blank';
+if(/^Expense$/i.test(txt)) return 'expense';
+if(/^Total\s+/i.test(txt)) return 'l2';
+if(/^[67]\d{5}\s*-/.test(txt)) return 'gl';
+if(/^\d+\s*-/.test(txt)) return 'vendor';
+if(/^No Vendor\s*-/i.test(txt)) return 'novendor';
+return 'other';
+}
+function parseQuarterFeed(wb){
+const rows = wb.rows;
+const quarterHeader = String(rows[0][5] || rows[0][9] || rows[0][13] || '').trim();
+const monthLabels = [String(rows[1][5]||'').trim(), String(rows[1][9]||'').trim(), String(rows[1][13]||'').trim()];
+const fcstRaw = [rows[2][3], rows[2][7], rows[2][11], rows[2][15]].map(x => String(x||'')).find(x => /forecast|fcst/i.test(x)) || 'Forecast';
+const forecastLabel = fcstRaw.replace(/\bFCST\b/ig,'Forecast').replace(/\s+/g,' ').trim();
+const dataRows = [];
+for(let i=3;i<rows.length;i++){
+const label = String(rows[i][0] || '').trim();
+if(!label) continue;
+dataRows.push({
+index: i,
+label,
+rowType: classifyRow(label),
+__raw: rows[i],
+total: { w:v(rows[i][1]), p:v(rows[i][2]), f:v(rows[i][3]) },
+months: [
+{ label: monthLabels[0], w:v(rows[i][5]), p:v(rows[i][6]), f:v(rows[i][7]) },
+{ label: monthLabels[1], w:v(rows[i][9]), p:v(rows[i][10]), f:v(rows[i][11]) },
+{ label: monthLabels[2], w:v(rows[i][13]), p:v(rows[i][14]), f:v(rows[i][15]) }
+]
+});
+}
+return { quarterHeader, monthLabels, forecastLabel, dataRows };
+}
+// FIXED: The Year feed lays out each quarter as a 12-column block grouped by
+// metric (3 months of Working, 3 of Plan, 3 of Forecast, 3 of Working-vs-FCST).
+// Column map (0-indexed array from sheet_to_json):
+//   FY Total: Working=1, Plan=2, Forecast=3, (WvF=4)
+//   Q1 -> Working 5,6,7 | Plan 8,9,10  | Fcst 11,12,13
+//   Q2 -> Working 17,18,19 | Plan 20,21,22 | Fcst 23,24,25
+//   Q3 -> Working 29,30,31 | Plan 32,33,34 | Fcst 35,36,37
+//   Q4 -> Working 41,42,43 | Plan 44,45,46 | Fcst 47,48,49
+// Each quarter total = sum of its three monthly cells per metric.
+function parseYearFeed(wb, meta){
+const rows = wb.rows;
+const headerRows = rows.slice(0,4);
+const qBases = [5, 17, 29, 41]; // start index of each quarter's Working months
+const qLabelRow = rows[1] || [];
+const dataRows = [];
+for(let i=4;i<rows.length;i++){
+const label = String(rows[i][0] || '').trim();
+if(!label) continue;
+const raw = rows[i];
+dataRows.push({
+index: i,
+label,
+rowType: classifyRow(label),
+__raw: raw,
+total: { w:v(raw[1]), p:v(raw[2]), f:v(raw[3]) },
+quarters: qBases.map((b, qi) => ({
+label: String(qLabelRow[b] || ('Q' + (qi+1))).trim(),
+w: sum3(raw, b),      // Working  = 3 month cells
+p: sum3(raw, b + 3),  // Plan     = next 3 month cells
+f: sum3(raw, b + 6)   // Forecast = next 3 month cells
+})),
+// 12 fiscal months (Working / Plan / Forecast) — used by the FP&A analyst bot.
+months: qBases.reduce((out, b) => out.concat([0,1,2].map(k => ({
+label: String((rows[3] || [])[b + k] || '').trim(),
+w: v(raw[b + k]), p: v(raw[b + 3 + k]), f: v(raw[b + 6 + k])
+}))), [])
+});
+}
+const monthCols = detectYearMonthlyColumns(headerRows);
+return { headerRows, dataRows, monthCols };
+}
+function detectYearMonthlyColumns(headerRows){
+const monthRow = headerRows[3] || [];
+const metricRow = headerRows[2] || [];
+const out = [];
+let currentMetric = '';
+for(let c=0;c<monthRow.length;c++){
+const monthLabel = String(monthRow[c] || '').trim();
+const rawMetric = String(metricRow[c] || '').trim();
+if(rawMetric) currentMetric = rawMetric;
+const metric = currentMetric;
+if(/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i.test(monthLabel) && /working|plan/i.test(metric)){
+out.push({ col:c, monthLabel, metric });
+}
+}
+return out;
+}
+function parseHcFeed(wb){
+const rows = wb.rows;
+const salaryIdx = rows.findIndex(r => String(r[0]||r[1]||'').toLowerCase().includes('salary accrued'));
+if(salaryIdx < 0) throw new Error('Could not find Salary Accrued row in HC feed.');
+const salaryRow = rows[salaryIdx];
+const employeeRows = rows.slice(salaryIdx+1).filter(r => String(r[0]||'').trim());
+return {
+salary: {
+planTotal: v(salaryRow[1]), q: [v(salaryRow[2]), v(salaryRow[3]), v(salaryRow[4]), v(salaryRow[5])],
+workTotal: v(salaryRow[6]), qWork: [v(salaryRow[7]), v(salaryRow[8]), v(salaryRow[9]), v(salaryRow[10])]
+},
+employeeRows: employeeRows.map(r => ({
+name: String(r[0]||'').trim(),
+planTotal: v(r[1]), workTotal: v(r[6]), variance: v(r[6]) - v(r[1]),
+isTbh: /^TBH\b/i.test(String(r[0]||'').trim())
+}))
+};
+}
+function parseTeFeed(wb){
+const rows = wb.rows;
+const headerIdx = rows.findIndex(r => String(r[0]||'').trim().toLowerCase() === 'employee' && String(r[1]||'').trim().toLowerCase() === 'vendor');
+if(headerIdx < 0) throw new Error('Could not find Employee/Vendor header row in T&E feed.');
+const header = rows[headerIdx].map(x => String(x||'').trim());
+const monthHeaders = header.slice(2).filter(Boolean);
+const body = rows.slice(headerIdx+1).filter(r => String(r[0]||'').trim());
+const totalIdx = body.findIndex(r => String(r[0]||'').trim().toLowerCase() === 'total');
+const detailRows = (totalIdx >= 0 ? body.slice(0,totalIdx) : body).map(r => ({ employee:String(r[0]||'').trim(), vendor:String(r[1]||'').trim(), values: monthHeaders.map((_,i) => v(r[i+2])) }));
+const totalRow = totalIdx >= 0 ? { employee:'Total', vendor:'', values: monthHeaders.map((_,i) => v(body[totalIdx][i+2])) } : { employee:'Total', vendor:'', values: monthHeaders.map((_,i) => detailRows.reduce((s,row)=>s+row.values[i],0)) };
+return { monthHeaders, detailRows, totalRow };
+}
+// Nomenclatura: <BU>_OPEXPLAN_<Mmm><YY>  ej. "IT_OPEXPLAN_Jun26"
+//   businessUnit = texto antes del primer "_"
+//   month token  = texto despues del ultimo "_"  (Jun26 -> Jun + 26)
+function parseOpexMeta(filename){
+const cleaned = String(filename||'').replace(/\.xlsx?$/i,'');
+const parts = cleaned.split('_');
+const businessUnit = parts.length ? parts[0].trim() : '';
+const monthRaw = parts.length > 1 ? parts[parts.length-1].trim() : '';
+const mMatch = monthRaw.match(/^([A-Za-z]{3,9})[ '\-]?(\d{2,4})?$/);
+const monthToken = mMatch ? normalizeMonth(mMatch[1]) : normalizeMonth(monthRaw);
+const yearToken = mMatch && mMatch[2] ? mMatch[2] : '';
+return { businessUnit, monthToken, yearToken, monthRaw, label: 'OPEX Feed' };
+}
+// Conserva filas y libro crudos para la vista Budget Utilization.
+function parseOpexFeed(wb, meta){
+return { meta: meta || {}, rows: wb.rows, workbook: wb.workbook, sheet: wb.sheet };
+}
+// ---------- No Vendor line-item feed (optional 6th feed) ----------
+// Layout (Pigment "OPEX Line Item" export):
+//   header row A : attribute labels (Account, Vendor, Description, Contract Start Date, Contract End Date, Amount)
+//   header row B : month labels under Amount ("Feb 26", "Mar 26", ...)
+//   header row C : scenario per column (Working, FY27 Plan, 6+6 Forecast)
+// Every attribute repeats once per scenario, because the same line number can hold a
+// different item in each scenario. Items are therefore matched by GL + vendor + description,
+// never by line number.
+function nvCellDate(x){
+if(x === null || x === undefined || x === '') return null;
+if(x instanceof Date) return isNaN(x.getTime()) ? null : x;
+if(typeof x === 'number' && x > 20000 && x < 80000) return new Date(Math.round((x - 25569) * 86400000));
+const s = String(x).trim();
+const m = s.match(/^([A-Za-z]{3,9})[\s\-'_\/]*(\d{2}|\d{4})$/);
+if(m){
+const mi = monthOrder.findIndex(mo => mo.toLowerCase() === m[1].slice(0,3).toLowerCase());
+if(mi < 0) return null;
+const yy = m[2].length === 4 ? Number(m[2]) : 2000 + Number(m[2]);
+return new Date(Date.UTC(yy, mi, 1));
+}
+const t = Date.parse(s);
+return Number.isFinite(t) ? new Date(t) : null;
+}
+// Fiscal ordinal: FY*12 + fiscal month index (Feb = 0 ... Jan = 11). FY27 = Feb-26 .. Jan-27.
+function nvFiscalOrd(dt){
+const mi = dt.getUTCMonth();
+const yy = dt.getUTCFullYear() % 100;
+const fy = mi === 0 ? yy : yy + 1;
+return fy * 12 + fiscalOrder.indexOf(monthOrder[mi]);
+}
+function nvFmtDate(x){
+const dt = nvCellDate(x);
+if(!dt) return '';
+return monthOrder[dt.getUTCMonth()] + ' ' + dt.getUTCDate() + ', ' + dt.getUTCFullYear();
+}
+function parseNoVendorFeed(wb, fileName){
+const rows = wb.rows || [];
+const head = rows.slice(0, 12);
+const attrRowIdx = head.findIndex(r => r.some(c => /^\s*account\s*$/i.test(String(c))));
+const scenRowIdx = head.findIndex(r => r.filter(c => /working|plan|forecast|fcst/i.test(String(c))).length >= 3);
+if(attrRowIdx < 0 || scenRowIdx < 0) throw new Error('No Vendor feed: could not find the Account / scenario header rows. Expected the Pigment "OPEX Line Item" layout.');
+let monthRowIdx = -1;
+for(let r = attrRowIdx; r < scenRowIdx; r++){
+if((rows[r] || []).filter(c => nvCellDate(c) && /[A-Za-z]{3}|^\d{5}$/.test(String(c))).length >= 3){ monthRowIdx = r; break; }
+}
+if(monthRowIdx < 0) throw new Error('No Vendor feed: could not find the month header row (e.g. "Feb 26").');
+const attrRow = rows[attrRowIdx], monthRow = rows[monthRowIdx], scenRow = rows[scenRowIdx];
+const width = Math.max(attrRow.length, monthRow.length, scenRow.length);
+const cols = [];
+let curAttr = '', curMonth = null;
+for(let c = 0; c < width; c++){
+const a = String(attrRow[c] || '').trim();
+if(a) curAttr = a.toLowerCase();
+const mcell = monthRow[c];
+if(mcell !== '' && mcell !== undefined && mcell !== null){ const dt = nvCellDate(mcell); curMonth = dt ? nvFiscalOrd(dt) : null; }
+const sc = String(scenRow[c] || '');
+const scen = /working/i.test(sc) ? 'w' : /forecast|fcst/i.test(sc) ? 'f' : /plan|budget/i.test(sc) ? 'p' : null;
+if(!scen || !curAttr) continue;
+let attr = null;
+if(/^account/.test(curAttr)) attr = 'account';
+else if(/^vendor/.test(curAttr)) attr = 'vendor';
+else if(/^desc/.test(curAttr)) attr = 'desc';
+else if(/start/.test(curAttr)) attr = 'start';
+else if(/end/.test(curAttr)) attr = 'end';
+else if(/amount|value/.test(curAttr)) attr = 'amount';
+if(!attr) continue;
+if(attr === 'amount' && curMonth === null) continue;
+cols.push({ c, attr, scen, ord: attr === 'amount' ? curMonth : null });
+}
+if(!cols.some(x => x.attr === 'amount')) throw new Error('No Vendor feed: no monthly Amount columns were found.');
+let bu = '';
+const entries = [];
+for(let i = scenRowIdx + 1; i < rows.length; i++){
+const r = rows[i] || [];
+const c0 = String(r[0] || '').trim(), c1 = String(r[1] || '').trim();
+if(/^total$/i.test(c0) || /^total$/i.test(c1)) continue;
+if(c0 && !bu) bu = c0;
+['w','p','f'].forEach(s => {
+const pick = attr => { const col = cols.find(x => x.scen === s && x.attr === attr); return col ? r[col.c] : ''; };
+const account = String(pick('account') || '').trim();
+if(!account) return;
+const amounts = {};
+cols.filter(x => x.scen === s && x.attr === 'amount').forEach(x => {
+const val = v(r[x.c]);
+if(Math.abs(val) >= 0.005) amounts[x.ord] = (amounts[x.ord] || 0) + val;
+});
+entries.push({
+s, account,
+vendor: String(pick('vendor') || '').trim(),
+desc: String(pick('desc') || '').trim(),
+start: nvFmtDate(pick('start')),
+end: nvFmtDate(pick('end')),
+amounts
+});
+});
+}
+return { fileName: fileName || '', bu, entries };
+}
+function nvGlCode(label){ const m = String(label || '').match(/^\s*(\d{5,})/); return m ? m[1] : ''; }
+function nvKey(s){ return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+// Joins the line items with the board: board FY months, coverage per scenario,
+// validations, and the No Vendor rows of the Year feed (per GL) for reconciliation.
+function buildNoVendorModel(nvParsed, meta, yearRows, monthLabels){
+const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+const warnings = [], notes = [];
+const fyNum = parseInt(String(meta.fyToken || '').replace(/\D/g, ''), 10);
+const rm = fiscalOrder.indexOf(meta.monthToken);
+if(!Number.isFinite(fyNum)) warnings.push('Could not read the fiscal year from the Quarter filename, so the No Vendor feed months cannot be aligned to the board.');
+const base = fyNum * 12;
+const firstOrd = s => { let o = null; nvParsed.entries.forEach(e => { if(e.s !== s) return; Object.keys(e.amounts).forEach(k => { const n = Number(k); if(o === null || n < o) o = n; }); }); return o; };
+const wOrd = firstOrd('w'), fOrd = firstOrd('f');
+const toIdx = o => o === null ? null : o - base;
+const label = i => (i === null || i === undefined) ? '—' : (i >= 0 && i < 12 ? (monthLabels[i] || fiscalOrder[i]) : (i >= 12 ? fiscalOrder[i - 12] + ' (next FY)' : fiscalOrder[(i % 12 + 12) % 12] + ' (prior FY)'));
+const wStart = toIdx(wOrd), fStart = toIdx(fOrd);
+if(rm >= 0 && wStart !== null && wStart !== rm + 1){
+warnings.push(`Working line items start in ${label(wStart)}, but this board is ${meta.monthToken} ${meta.fyToken} (expected ${label(rm + 1)}). The No Vendor feed may be from a different close.`);
+}
+if(wStart === null) notes.push('The No Vendor feed has no Working amounts, so only Plan and Forecast lines can be shown.');
+if(wStart !== null && fStart !== null && wStart - fStart > 1){
+notes.push(`Previous forecast not refreshed yet: it projects from ${label(fStart)}, Working from ${label(wStart)}. ${label(fStart)}–${label(wStart - 1)} have Forecast line items but Working is actuals with no line detail.`);
+} else if(wStart !== null && fStart !== null && fStart > wStart){
+notes.push(`Forecast line items start in ${label(fStart)}, after Working (${label(wStart)}).`);
+}
+const code = String(meta.dashboardCode || '');
+const buNorm = nvKey(String(nvParsed.bu).replace(/^\d+\s*-\s*/, ''));
+const codeNorm = nvKey(code.replace(/^\d+\s*-\s*/, ''));
+const buNum = (String(nvParsed.bu).match(/^\d+/) || [''])[0];
+const fileNorm = nvKey(nvParsed.fileName);
+const buOk = !nvParsed.bu || !codeNorm || buNorm.indexOf(codeNorm) >= 0 || codeNorm.indexOf(buNorm) >= 0 || fileNorm.indexOf(codeNorm) === 0 || (buNum && code.indexOf(buNum) >= 0);
+if(!buOk) warnings.push(`The No Vendor feed is for "${nvParsed.bu}" but the board is "${code}". Check that the right file was uploaded.`);
+
+// Board side: No Vendor rows of the Year feed, per GL code, plus GL label and category.
+const glInfo = {}, order = [];
+let pendingV = [], pendingG = [];
+(yearRows || []).forEach(r => {
+if(r.rowType === 'vendor' || r.rowType === 'novendor'){ pendingV.push(r); return; }
+if(r.rowType === 'gl'){
+const c = nvGlCode(r.label);
+if(c && !glInfo[c]){ glInfo[c] = { code:c, label:r.label, cat:'', board:null }; order.push(c); }
+pendingV.forEach(x => {
+if(x.rowType !== 'novendor' || !c) return;
+const g = glInfo[c];
+if(!g.board) g.board = { w:new Array(12).fill(0), p:new Array(12).fill(0), f:new Array(12).fill(0) };
+(x.months || []).forEach((m, k) => { g.board.w[k] += m.w; g.board.p[k] += m.p; g.board.f[k] += m.f; });
+});
+pendingV = []; if(c) pendingG.push(c); return;
+}
+if(r.rowType === 'l2'){ pendingG.forEach(c => { glInfo[c].cat = cleanLabel(r.label); }); pendingG = []; pendingV = []; }
+});
+
+// Line items: keep board-FY months, merge scenarios by GL + vendor + description.
+const items = {}, itemOrder = [];
+nvParsed.entries.forEach(e => {
+const arr = new Array(12).fill(0);
+let any = false;
+Object.keys(e.amounts).forEach(k => { const i = Number(k) - base; if(i >= 0 && i < 12){ arr[i] += e.amounts[k]; any = true; } });
+if(!any) return;
+const gl = nvGlCode(e.account);
+const isNV = !e.vendor || /^no vendor/i.test(e.vendor);
+const vend = isNV ? 'No Vendor' : e.vendor.replace(/^\d+\s*-\s*/, '').trim();
+const key = gl + '|' + (isNV ? 'nv' : nvKey(e.vendor)) + '|' + nvKey(e.desc);
+let it = items[key];
+if(!it){ it = items[key] = { key, gl, account:e.account, vendor:vend, nv:isNV, d:e.desc || '(no description)', w:new Array(12).fill(0), p:new Array(12).fill(0), f:new Array(12).fill(0), dt:{} }; itemOrder.push(key); }
+arr.forEach((x, k) => { it[e.s][k] += x; });
+if(e.start || e.end) it.dt[e.s] = (e.start || '?') + ' – ' + (e.end || '?');
+if(gl && !glInfo[gl]){ glInfo[gl] = { code:gl, label:e.account, cat:'', board:null, notInYear:true }; order.push(gl); }
+});
+const missing = order.filter(c => glInfo[c].notInYear);
+if(missing.length) warnings.push(`GL account${missing.length > 1 ? 's' : ''} ${missing.join(', ')} from the No Vendor feed ${missing.length > 1 ? 'are' : 'is'} not in the Year feed, so ${missing.length > 1 ? 'they' : 'it'} cannot be reconciled.`);
+const gls = order.map(c => {
+const g = glInfo[c];
+const its = itemOrder.map(k => items[k]).filter(it => it.gl === c).map(it => ({
+d:it.d, v:it.vendor, nv:it.nv, w:it.w.map(r2), p:it.p.map(r2), f:it.f.map(r2),
+dt: it.dt.w || it.dt.f || it.dt.p || ''
+}));
+return { code:c, label:g.label, cat:g.cat, board: g.board ? { w:g.board.w.map(r2), p:g.board.p.map(r2), f:g.board.f.map(r2) } : null, items:its };
+}).filter(g => g.items.length || (g.board && g.board.w.concat(g.board.p, g.board.f).some(x => Math.abs(x) >= 0.5)));
+return {
+file: nvParsed.fileName, bu: nvParsed.bu, rm, wStart, fStart,
+months: (monthLabels && monthLabels.length === 12) ? monthLabels.slice() : fiscalOrder.slice(),
+warnings, notes, gls
+};
+}
+// Pure helpers shared by the board, the drill-down and the exported HTML.
+// They are serialized with toString(), so they must not reference anything outside their body.
+function nvSlice(NV, code, months, bk){
+var g = null, i;
+if(!NV || !NV.gls) return null;
+for(i = 0; i < NV.gls.length; i++){ if(NV.gls[i].code === code){ g = NV.gls[i]; break; } }
+// Accounts without No Vendor line items in the feed (e.g. payroll) get no detail at all.
+if(!g || !g.items.some(function(it){ return it.nv; })) return null;
+function sum(a, ms){ var s = 0; ms.forEach(function(m){ s += (a && a[m]) || 0; }); return s; }
+var rm = NV.rm, fs = (NV.fStart === null || NV.fStart === undefined) ? 99 : NV.fStart;
+var proj = months.filter(function(m){ return m > rm; }), closed = months.filter(function(m){ return m <= rm; });
+function det(ms){ return bk === 'f' ? ms.filter(function(m){ return m >= fs; }) : ms; }
+var bd = g.board || { w:[], p:[], f:[] };
+// rows = only the line items that move Working away from the benchmark (|var| >= $1);
+// totals (detW/detB) still cover every line so the unexplained remainder is exact.
+var P = { months:proj, rows:[], detW:0, detB:0, boardW:sum(bd.w, proj), boardB:sum(bd[bk], proj) };
+var C = { months:closed, detMonths:det(closed), rows:[], boardW:sum(bd.w, closed), boardB:sum(bd[bk], closed), detB:0 };
+var V = [];
+g.items.forEach(function(it){
+if(!it.nv){ var vw = sum(it.w, proj), vb = sum(it[bk], det(months)); if(Math.abs(vw) >= 0.5 || Math.abs(vb) >= 0.5) V.push({ it:it, w:vw, b:vb }); return; }
+var w = sum(it.w, proj), b = sum(it[bk], det(proj));
+P.detW += w; P.detB += b;
+if(Math.abs(w - b) >= 1) P.rows.push({ it:it, w:w, b:b, v:w - b });
+var cb = sum(it[bk], C.detMonths);
+if(Math.abs(cb) >= 0.5){ C.rows.push({ it:it, b:cb }); C.detB += cb; }
+});
+P.rows.sort(function(a, b){ return Math.abs(b.v) - Math.abs(a.v); });
+C.rows.sort(function(a, b){ return Math.abs(b.b) - Math.abs(a.b); });
+P.unW = P.boardW - P.detW; P.unB = P.boardB - P.detB; P.unV = P.unW - P.unB;
+C.unB = sum(bd[bk], C.detMonths) - C.detB;
+return { gl:g, proj:P, closed:C, vend:V };
+}
+function nvMiniHtml(NV, code, months, bk){
+var s = nvSlice(NV, code, months, bk);
+if(!s) return '';
+function esc(x){ return String(x == null ? '' : x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function k(n, signed){ if(!isFinite(n) || Math.abs(n) < (signed ? 1 : 0.5)) return '—'; var a = Math.abs(n), t = a >= 1000 ? '$' + (a / 1000).toFixed(a >= 100000 ? 0 : 1) + 'K' : '$' + Math.round(a); if(signed) return (n > 0 ? '+' : '-') + t; return n < 0 ? '(' + t + ')' : t; }
+function vc(n){ return Math.abs(n) < 500 ? 'var-neu' : n < 0 ? 'var-fav' : 'var-unfav'; }
+function rng(ms){ var L = NV.months || []; if(!ms.length) return ''; return ms.length === 1 ? L[ms[0]] : L[ms[0]] + '–' + L[ms[ms.length - 1]]; }
+var bl = bk === 'f' ? 'FCST' : 'Plan', body = '';
+var cv = s.closed.boardW - s.closed.boardB;
+if(s.proj.months.length && (s.proj.rows.length || Math.abs(s.proj.unV) >= 1)){
+body += '<div class="nv-mini-h">' + esc(rng(s.proj.months)) + ' · line items causing the variance</div>';
+body += '<table class="nv-mini-t"><thead><tr><th></th><th>Working</th><th>' + bl + '</th><th>Var</th></tr></thead><tbody>';
+s.proj.rows.forEach(function(r){
+var tagTxt = Math.abs(r.b) < 0.5 ? 'not in ' + bl : Math.abs(r.w) < 0.5 ? 'no Working' : '';
+body += '<tr><td>' + esc(r.it.d) + (tagTxt ? ' <span class="nv-tag">' + tagTxt + '</span>' : '') + '</td><td>' + k(r.w) + '</td><td>' + k(r.b) + '</td><td class="' + vc(r.v) + '">' + k(r.v, true) + '</td></tr>';
+});
+if(Math.abs(s.proj.unV) >= 1) body += '<tr class="nv-un"><td>Not explained by line items</td><td>' + k(s.proj.unW) + '</td><td>' + k(s.proj.unB) + '</td><td class="' + vc(s.proj.unV) + '">' + k(s.proj.unV, true) + '</td></tr>';
+body += '</tbody></table>';
+}
+if(s.closed.months.length && Math.abs(cv) >= 1){
+body += '<div class="nv-mini-note"><b>' + esc(rng(s.closed.months)) + ' actuals:</b> ' + k(s.closed.boardW) + ' vs ' + bl + ' ' + k(s.closed.boardB) + ' (<span class="' + vc(cv) + '">' + k(cv, true) + '</span>). Actuals carry no line detail' + (s.closed.rows.length ? '; planned lines: ' + s.closed.rows.slice(0, 4).map(function(r){ return esc(r.it.d) + ' ' + k(r.b); }).join(', ') + (s.closed.rows.length > 4 ? ', …' : '') : '') + '.</div>';
+}
+if(!body) return '';
+var h = '<div class="nv-mini">';
+(NV.warnings || []).forEach(function(w){ h += '<div class="nv-mini-warn">' + esc(w) + '</div>'; });
+if(bk === 'f') (NV.notes || []).forEach(function(n){ h += '<div class="nv-mini-note">' + esc(n) + '</div>'; });
+h += body;
+return h + '</div>';
+}
+function deriveModel(parsed){
+const quarterExpense = parsed.quarter.dataRows.find(r => r.rowType === 'expense');
+const yearExpense = parsed.year.dataRows.find(r => r.rowType === 'expense');
+if(!quarterExpense || !yearExpense) throw new Error('Could not find Expense row in Quarter or Year feed.');
+const monthIdx = parsed.quarter.monthLabels.findIndex(m => normalizeMonth(m) === parsed.meta.monthToken);
+const effectiveMonthIdx = monthIdx >= 0 ? monthIdx : 0;
+const monthLabel = parsed.quarter.monthLabels[effectiveMonthIdx] || parsed.meta.monthToken;
+const badgeLabel = `${parsed.meta.dashboardCode} · ${parsed.meta.monthToken} ${parsed.meta.fyToken} · ${parsed.quarter.quarterHeader}`;
+const l2QuarterRows = parsed.quarter.dataRows.filter(r => r.rowType === 'l2');
+const l2YearRows = parsed.year.dataRows.filter(r => r.rowType === 'l2');
+const quarterPlanVar = l2QuarterRows.map(r => ({ ...r, variance: r.total.w - r.total.p }));
+const quarterFcstVar = l2QuarterRows.map(r => ({ ...r, variance: r.total.w - r.total.f }));
+const yearPlanVar = l2YearRows.map(r => ({ ...r, variance: r.total.w - r.total.p }));
+const yearFcstVar = l2YearRows.map(r => ({ ...r, variance: r.total.w - r.total.f }));
+const quarterTopPlan = rankTop(quarterPlanVar, 3);
+const quarterTopFcst = rankTop(quarterFcstVar, 3);
+const yearTopPlan = rankTop(yearPlanVar, 3);
+const yearTopFcst = rankTop(yearFcstVar, 3);
+const qIdx = Math.max(0, quarterNum(parsed.quarter.quarterHeader));
+const quarterMonths = [qIdx * 3, qIdx * 3 + 1, qIdx * 3 + 2];
+const yearMonths = [0,1,2,3,4,5,6,7,8,9,10,11];
+const quarterDriverBlocksPlan = deriveQuarterDriverBlocks(parsed.quarter, quarterPlanVar, 'p', 35000, quarterMonths);
+const quarterDriverBlocksFcst = deriveQuarterDriverBlocks(parsed.quarter, quarterFcstVar, 'f', 35000, quarterMonths);
+const yearDriverBlocksPlan = deriveYearDriverBlocks(parsed.year, yearPlanVar, 'p', 75000, yearMonths);
+const yearDriverBlocksFcst = deriveYearDriverBlocks(parsed.year, yearFcstVar, 'f', 75000, yearMonths);
+const yearFirst = parsed.year.dataRows.find(r => r.months && r.months.length === 12);
+const yearMonthLabels = yearFirst ? yearFirst.months.map((x, i) => normalizeMonth(x.label) || fiscalOrder[i]) : fiscalOrder.slice();
+const nv = parsed.nv ? buildNoVendorModel(parsed.nv, parsed.meta, parsed.year.dataRows, yearMonthLabels) : null;
+const hc = parsed.hc ? deriveHc(parsed.hc) : null;
+const trend = deriveTrend(parsed.year, parsed.meta.monthToken, yearExpense.label);
+const te = parsed.te ? deriveTe(parsed.te) : null;
+const actions = deriveActions(parsed, quarterTopPlan, yearTopPlan, quarterDriverBlocksPlan, hc, te);
+return {
+meta: {
+dashboardCode: parsed.meta.dashboardCode,
+fyToken: parsed.meta.fyToken,
+monthToken: parsed.meta.monthToken,
+currentQuarterLabel: parsed.quarter.quarterHeader,
+forecastLabel: parsed.quarter.forecastLabel,
+badgeLabel,
+preparedBy: parsed.meta.preparedBy
+},
+quarter: {
+monthLabels: parsed.quarter.monthLabels,
+allRows: parsed.quarter.dataRows,
+expense: quarterExpense,
+l2Rows: l2QuarterRows,
+kpis: {
+kpi1: quarterExpense.months[effectiveMonthIdx].w - quarterExpense.months[effectiveMonthIdx].p,
+kpi2: quarterExpense.months[effectiveMonthIdx].w - quarterExpense.months[effectiveMonthIdx].f,
+kpi3: quarterExpense.total.w - quarterExpense.total.p,
+kpi4: quarterExpense.total.w - quarterExpense.total.f
+},
+topPlan: quarterTopPlan,
+topFcst: quarterTopFcst,
+driverBlocksPlan: quarterDriverBlocksPlan,
+driverBlocksFcst: quarterDriverBlocksFcst,
+currentMonthLabel: monthLabel
+},
+year: {
+elapsedMonths: trend.labels,
+allRows: parsed.year.dataRows,
+expense: yearExpense,
+l2Rows: l2YearRows,
+kpis: { kpi5: yearExpense.total.w - yearExpense.total.p, kpi6: yearExpense.total.w - yearExpense.total.f },
+trend,
+topPlan: yearTopPlan,
+topFcst: yearTopFcst,
+driverBlocksPlan: yearDriverBlocksPlan,
+driverBlocksFcst: yearDriverBlocksFcst
+},
+hc,
+te,
+opex: parsed.opex || null,
+nv,
+actions
+};
+}
+function rankTop(rows, n){
+const sorted = rows.slice().sort((a,b) => Math.abs(b.variance) - Math.abs(a.variance));
+const top = sorted.slice(0,n);
+const totalVar = rows.reduce((s,r)=>s+r.variance,0);
+const others = totalVar - top.reduce((s,r)=>s+r.variance,0);
+return { rows: top, others, totalVar };
+}
+function deriveQuarterDriverBlocks(q, rows, benchmarkKey, threshold, months){
+const qualified = rows.filter(r => Math.abs(r.variance) > threshold);
+return qualified.map(r => ({
+id: slug('q-' + r.index + '-' + benchmarkKey + '-' + r.label),
+label: r.label,
+variance: r.variance,
+benchmarkKey,
+months,
+vendors: extractQuarterVendors(q.dataRows, r, benchmarkKey, 'quarter'),
+comments: []
+}));
+}
+// Full-year blocks now list the real vendor rows of the category (same logic as the
+// quarter blocks) instead of a single "No Vendor -" placeholder carrying the whole variance.
+function deriveYearDriverBlocks(y, rows, benchmarkKey, threshold, months){
+return rows.filter(r => Math.abs(r.variance) > threshold).map(r => ({
+id: slug('y-' + r.index + '-' + benchmarkKey + '-' + r.label),
+label: r.label,
+variance: r.variance,
+benchmarkKey,
+months,
+vendors: extractQuarterVendors(y.dataRows, r, benchmarkKey, 'full-year'),
+comments: []
+}));
+}
+function extractQuarterVendors(dataRows, targetRow, benchmarkKey, scopeWord){
+const idx = dataRows.findIndex(r => r.index === targetRow.index);
+const glMap = buildGlMap(dataRows);
+const vendors = [];
+for(let i = idx - 1; i >= 0; i--){
+const row = dataRows[i];
+if(row.rowType === 'l2' || row.rowType === 'expense') break;
+if(row.rowType === 'vendor' || row.rowType === 'novendor'){
+const bench = row.total[benchmarkKey] || 0;
+const variance = row.total.w - bench;
+const gl = glMap[row.index] || '';
+vendors.push({
+name: row.label,
+variance,
+gl,
+isNV: row.rowType === 'novendor',
+glCode: nvGlCode(gl),
+comment: summarizeVariance(row.rowType === 'novendor' && gl ? 'No Vendor in ' + gl : row.label, variance, scopeWord || 'quarter')
+});
+}
+}
+const picked = vendors.sort((a,b)=>Math.abs(b.variance)-Math.abs(a.variance)).slice(0,4);
+if(!picked.length){
+return [{ name:'No Vendor -', variance:targetRow.variance, comment:'Variance appears pooled inside unattributed detail rows. Review timing and spread within this L2 block.' }];
+}
+return picked;
+}
+function summarizeVariance(name, variance, scope){
+const direction = variance < 0 ? 'below benchmark / favorable' : 'above benchmark / unfavorable';
+const cleaned = String(name||'').replace(/^\d+\s*-\s*/,'').replace(/^Total\s+/,'');
+return `${cleaned} is ${direction} at ${fmtK(variance)} on a ${scope} basis. Validate timing, scope, and whether the run-rate should persist into the remaining periods.`;
+}
+function deriveTrend(yearFeed, monthToken, expenseLabel){
+const expenseRow = yearFeed.dataRows.find(r => r.label === expenseLabel) || yearFeed.dataRows.find(r => r.rowType === 'expense');
+const cutoff = fiscalOrder.indexOf(monthToken);
+const allowed = cutoff >= 0 ? fiscalOrder.slice(0, cutoff + 1) : fiscalOrder.slice(0, 1);
+const workingCols = yearFeed.monthCols.filter(c => /working/i.test(c.metric) && !/vs/i.test(c.metric));
+const planCols = yearFeed.monthCols.filter(c => /plan/i.test(c.metric));
+const labels = [];
+const working = [];
+const plan = [];
+allowed.forEach(mon => {
+const wCol = workingCols.find(c => normalizeMonth(c.monthLabel) === mon);
+const pCol = planCols.find(c => normalizeMonth(c.monthLabel) === mon);
+if(wCol && pCol && expenseRow && expenseRow.__raw){
+labels.push(mon);
+working.push(v(expenseRow.__raw[wCol.col]));
+plan.push(v(expenseRow.__raw[pCol.col]));
+}
+});
+if(!labels.length){
+return { labels: allowed, working: allowed.map(()=>0), plan: allowed.map(()=>0) };
+}
+return { labels, working, plan };
+}
+function deriveHc(hc){
+const rows = hc.employeeRows;
+const activePlan = rows.filter(r => !r.isTbh && r.planTotal > 0).length;
+const activeWork = rows.filter(r => !r.isTbh && r.planTotal > 0 && r.workTotal > 0).length;
+const tbhPlan = rows.filter(r => r.isTbh && r.planTotal > 0).length;
+const tbhWork = rows.filter(r => r.isTbh && r.workTotal > 0).length;
+const newHires = rows.filter(r => r.planTotal === 0 && r.workTotal > 0).length;
+const endingPlan = rows.filter(r => r.planTotal > 0).length;
+const endingWork = rows.filter(r => r.workTotal > 0).length;
+const topVarianceEmployees = rows.slice().sort((a,b)=>Math.abs(b.variance)-Math.abs(a.variance)).slice(0,4).map(r => ({
+...r,
+comment: hcComment(r)
+}));
+return {
+salaryAccrued: hc.salary,
+employeeRows: rows,
+movementCounts: { activePlan, activeWork, tbhPlan, tbhWork, newHires, endingPlan, endingWork },
+topVarianceEmployees
+};
+}
+function hcComment(r){
+if(r.isTbh && r.workTotal === 0) return 'Open req not filled yet; plan remains in place while working has not started.';
+if(r.isTbh && r.workTotal > 0) return 'TBH line is now flowing through working, consistent with an in-year hire against an open req.';
+if(r.planTotal === 0 && r.workTotal > 0) return 'Working cost is showing without plan budget, consistent with a new hire or transfer not included in plan.';
+if(r.variance < 0) return 'Working is below plan, likely driven by delayed fill, lower run rate, or partial-year employment.';
+if(r.variance > 0) return 'Working is above plan, likely driven by earlier start timing, higher comp, or accrual timing.';
+return 'No material variance versus plan.';
+}
+function deriveTe(te){
+const rows = te.detailRows.map(r => ({ ...r, grandTotal: r.values.reduce((s,n)=>s+n,0) }));
+const totalRow = { ...te.totalRow, grandTotal: te.totalRow.values.reduce((s,n)=>s+n,0) };
+return { headers: ['Employee','Vendor',...te.monthHeaders,'Grand Total'], rows, totalRow };
+}
+function deriveActions(parsed, quarterTopPlan, yearTopPlan, qBlocks, hc, te){
+const actions = [];
+quarterTopPlan.rows.slice(0,2).forEach(r => actions.push(`Review ${r.label} at ${fmtK(r.variance)} versus plan and confirm whether the quarter run-rate should persist.`));
+yearTopPlan.rows.slice(0,2).forEach(r => actions.push(`Confirm the full-year outlook for ${r.label}; current variance is ${fmtK(r.variance)} versus plan.`));
+if(qBlocks[0] && qBlocks[0].vendors[0]) actions.push(`Validate the vendor driver for ${qBlocks[0].label}, especially ${qBlocks[0].vendors[0].name}.`);
+if(hc && hc.topVarianceEmployees[0]) actions.push(`Confirm HC variance driver for ${hc.topVarianceEmployees[0].name} and whether it reflects start timing, transfer, or comp variance.`);
+while(actions.length < 6) actions.push('Review any remaining variance outside the top drivers and confirm whether follow-up is needed before close.');
+return actions.slice(0,6);
+}
+function renderDashboard(model){
+document.getElementById('upload-shell').classList.add('hidden');
+REVIEW_MONTH_IDX = model.quarter.monthLabels.findIndex(m => normalizeMonth(m) === model.meta.monthToken);
+REVIEW_Q_IDX = quarterNum(model.meta.currentQuarterLabel);
+CURRENT_NV = model.nv;
+const html = `
+<style>
+#dashboard-root th.tot-col{ background:#e0e7ff !important; color:#312e81 !important; }
+#dashboard-root td.tot-col{ background:#eef2ff !important; }
+#dashboard-root th.tot-end, #dashboard-root td.tot-end{ border-right:2px solid #a5b4fc !important; }
+#dashboard-root th.tot-col:first-of-type, #dashboard-root td.tot-col:first-of-type{ border-left:2px solid #a5b4fc !important; }
+#dashboard-root th.rev-col{ background:#e0e7ff !important; color:#312e81 !important; }
+#dashboard-root td.rev-col{ background:#eef2ff !important; }
+#dashboard-root th.rev-start, #dashboard-root td.rev-start{ border-left:2px solid #a5b4fc !important; }
+#dashboard-root th.rev-end, #dashboard-root td.rev-end{ border-right:2px solid #a5b4fc !important; }
+#dashboard-root textarea.vedit,
+#dashboard-root textarea.hc-edit,
+#dashboard-root textarea.act-text,
+#dashboard-root .add-comment-input{ font-size:13.5px !important; line-height:1.5 !important; color:#0f172a !important; }
+#dashboard-root .vrow p,
+#dashboard-root .hcrow p{ font-size:13px !important; }
+</style>
+${renderOverview(model)}
+${renderVarianceSection('sec-qplan', `${model.meta.currentQuarterLabel} vs ${model.meta.fyToken} Plan`, model.quarter.topPlan, model.quarter.driverBlocksPlan, model.quarter.l2Rows, 'p', model.quarter.monthLabels, model.quarter.expense.total.w, model.quarter.expense.total.p, `${model.meta.fyToken} Plan`, model.quarter.expense)}
+${renderVarianceSection('sec-qfcst', `${model.meta.currentQuarterLabel} vs ${model.meta.forecastLabel}`, model.quarter.topFcst, model.quarter.driverBlocksFcst, model.quarter.l2Rows, 'f', model.quarter.monthLabels, model.quarter.expense.total.w, model.quarter.expense.total.f, model.meta.forecastLabel, model.quarter.expense)}
+${renderYearSection('sec-fyplan', `Full Year vs ${model.meta.fyToken} Plan`, model.year.topPlan, model.year.driverBlocksPlan, model.year.l2Rows, 'p', model.year.expense.total.w, model.year.expense.total.p, `${model.meta.fyToken} Plan`, model.year.expense)}
+${renderYearSection('sec-fyfcst', `Full Year vs ${model.meta.forecastLabel}`, model.year.topFcst, model.year.driverBlocksFcst, model.year.l2Rows, 'f', model.year.expense.total.w, model.year.expense.total.f, model.meta.forecastLabel, model.year.expense)}
+${renderTE(model)}
+${renderHC(model)}
+${renderActions(model)}
+`;
+dom.root.innerHTML = html;
+bindInteractive(model);
+renderCharts(model);
+mountAnalystBot();
+}
+function renderOverview(model){
+const k = model.quarter.kpis;
+const y = model.year.kpis;
+return `<section class="sec" id="sec-overview">
+<div class="sec-hdr"><div class="sec-hdr-left"><span class="sec-ic"><i class="ti ti-layout-dashboard"></i></span><span class="sec-title">Performance Overview</span></div><span class="sec-tag">Prepared by ${escapeHtml(model.meta.preparedBy)} · ${escapeHtml(model.meta.badgeLabel)}</span></div>
+<div class="kpi-grid">
+${kpiCard(model.quarter.currentMonthLabel, k.kpi1, 'Current Month vs Plan')}
+${kpiCard(model.quarter.currentMonthLabel, k.kpi2, `Current Month vs ${model.meta.forecastLabel}`)}
+${kpiCard(model.meta.currentQuarterLabel, k.kpi3, 'Quarter vs Plan')}
+${kpiCard(model.meta.currentQuarterLabel, k.kpi4, `Quarter vs ${model.meta.forecastLabel}`)}
+${kpiCard(model.meta.fyToken, y.kpi5, 'Full Year vs Plan')}
+</div>
+<div class="sec-hdr"><span>Trend</span><span class="sec-tag">Working vs Plan · elapsed fiscal months</span></div>
+<div class="chart-legend"><div class="legend-key"><span class="legend-swatch work"></span> Working</div><div class="legend-key"><span class="legend-swatch plan dashed"></span> Plan</div></div>
+<div class="trend-wrap"><canvas id="trendC"></canvas></div>
+</section>`;
+}
+function kpiCard(label, val, sub){
+const z = isZeroK(val);
+const cls = z ? 'kpi-neu' : val < 0 ? 'kpi-fav' : 'kpi-unfav';
+const chip = z ? 'plan' : val < 0 ? 'fav' : 'unfav';
+let icon = 'ti-chart-bar';
+if(/month/i.test(sub)) icon = 'ti-calendar-dollar';
+else if(/full year/i.test(sub)) icon = 'ti-calendar-stats';
+else if(/quarter/i.test(sub)) icon = 'ti-chart-bar';
+return `<div class="kpi-card"><div class="kpi-ic ${chip}"><i class="ti ${icon}"></i></div><div class="kpi-label">${escapeHtml(label)}</div><div class="kpi-val ${cls}">${fmtK(val)}</div><div class="kpi-sub">${escapeHtml(sub)}</div>${varianceBadge(val)}</div>`;
+}
+function renderVarianceSection(id, title, topBundle, blocks, rows, benchmarkKey, monthLabels, workingEnd, baseStart, benchmarkLabel, totalRow){
+const secIcon = id.indexOf('fcst') !== -1 ? 'ti-chart-dots-3' : 'ti-trending-down';
+const labels = [benchmarkLabel, ...topBundle.rows.map(r => cleanLabel(r.label)), 'Others', 'Working'];
+const vars = [...topBundle.rows.map(r=>r.variance), topBundle.others];
+return `<section class="sec" id="${id}">
+<div class="sec-hdr"><div class="sec-hdr-left"><span class="sec-ic"><i class="ti ${secIcon}"></i></span><span class="sec-title">${escapeHtml(title)}</span></div><span class="sec-tag">${escapeHtml(benchmarkLabel)}</span></div>
+<div class="sublbl">Waterfall</div>
+<div class="wf-wrap"><canvas id="${id}-wf"></canvas></div>
+<div class="sublbl">L2 detail</div>
+<div class="tbl-wrap">${renderQuarterTable(rows, benchmarkKey, monthLabels, totalRow, id)}</div>
+<div class="sublbl">Drivers</div>
+${blocks.map(b => renderDriverBlock(b)).join('') || '<div class="comment-block">No driver block crossed the materiality threshold for this section.</div>'}
+<div class="sublbl">Additional Comments</div>
+<div class="comment-block" data-comment-block="${id}-comments" data-comment-container="${id}-comments">${renderAdditionalComments(`${id}-comments`)}</div>
+<script type="application/json" id="${id}-wf-data">${JSON.stringify({labels, baseStart, vars, workingEnd})}</script>
+</section>`;
+}
+function renderYearSection(id, title, topBundle, blocks, rows, benchmarkKey, workingEnd, baseStart, benchmarkLabel, totalRow){
+const secIcon = id.indexOf('fcst') !== -1 ? 'ti-chart-line' : 'ti-calendar-stats';
+const labels = [benchmarkLabel, ...topBundle.rows.map(r => cleanLabel(r.label)), 'Others', 'Working'];
+const vars = [...topBundle.rows.map(r=>r.variance), topBundle.others];
+return `<section class="sec" id="${id}">
+<div class="sec-hdr"><div class="sec-hdr-left"><span class="sec-ic"><i class="ti ${secIcon}"></i></span><span class="sec-title">${escapeHtml(title)}</span></div><span class="sec-tag">${escapeHtml(benchmarkLabel)}</span></div>
+<div class="sublbl">Waterfall</div>
+<div class="wf-wrap"><canvas id="${id}-wf"></canvas></div>
+<div class="sublbl">L2 detail</div>
+<div class="tbl-outer"><div class="tbl-inner">${renderYearTable(rows, benchmarkKey, totalRow, id)}</div></div>
+<div class="sublbl">Drivers</div>
+${blocks.map(b => renderDriverBlock(b)).join('') || '<div class="comment-block">No driver block crossed the materiality threshold for this section.</div>'}
+<div class="sublbl">Additional Comments</div>
+<div class="comment-block" data-comment-block="${id}-comments" data-comment-container="${id}-comments">${renderAdditionalComments(`${id}-comments`)}</div>
+<script type="application/json" id="${id}-wf-data">${JSON.stringify({labels, baseStart, vars, workingEnd})}</script>
+</section>`;
+}
+function stackedHeader(top, bottom, extraClass=''){
+return `<th class="stacked-th ${extraClass}">
+<span class="th-top">${escapeHtml(top)}</span>
+${bottom ? `<span class="th-bottom">${escapeHtml(bottom)}</span>` : ''}
+</th>`;
+}
+function renderQuarterTable(rows, benchmarkKey, monthLabels, totalRow, sectionId){
+const drill = sectionId === 'sec-qplan' || sectionId === 'sec-qfcst';
+const benchmarkName = benchmarkKey === 'p' ? 'Plan' : 'Forecast';
+const varianceName = `Working vs ${benchmarkName}`;
+let h = '<table><thead><tr><th>Category</th>' +
+stackedHeader('Quarter', 'Working', 'yw tot-col') +
+stackedHeader('Quarter', benchmarkName, 'tot-col') +
+stackedHeader('Variance', varianceName, 'yv tot-col tot-end variance-header');
+monthLabels.forEach((m, idx) => {
+const rv = idx===REVIEW_MONTH_IDX;
+const reviewWorkingClass = `yw${rv?' rev-col rev-start':''}`;
+const reviewBenchmarkClass = `${rv?'rev-col':''}`;
+const reviewVarianceClass = `mv${rv?' rev-col rev-end':''} variance-header`;
+h += stackedHeader(m, 'Working', reviewWorkingClass) +
+stackedHeader(m, benchmarkName, reviewBenchmarkClass) +
+stackedHeader('Variance', varianceName, reviewVarianceClass);
+});
+h += '</tr></thead><tbody>';
+const totalRows = totalRow ? [{ ...totalRow, label: totalRow.label || 'Expense', rowType: 'expense' }] : [];
+const orderedRows = rows.filter(r => r.rowType !== 'expense').concat(totalRows);
+orderedRows.forEach(r => {
+const qVar = r.total.w - r.total[benchmarkKey];
+const trCls = r.rowType === 'expense' ? 'tr-exp' : '';
+const dc = drill ? ' drill-cell' : '';
+const da = (period, periodLabel) => drill ? ` data-drill="1" data-scope="q" data-row-index="${r.index}" data-period="${period}" data-benchmark="${benchmarkKey}" data-label="${escapeHtml(cleanLabel(r.label))}" data-period-label="${escapeHtml(periodLabel)}"` : '';
+h += `<tr class="${trCls}"><td>${escapeHtml(cleanLabel(r.label))}</td>`+
+`<td class="yw tot-col${dc}"${da('q','Quarter total')}>${fmtKplain(r.total.w)}</td>`+
+`<td class="tot-col${dc}"${da('q','Quarter total')}>${fmtKplain(r.total[benchmarkKey])}</td>`+
+`<td class="yv tot-col tot-end ${varClass(qVar)}${dc}"${da('q','Quarter total')}>${fmtK(qVar)}</td>`;
+r.months.forEach((m, idx) => {
+const mv = m.w - m[benchmarkKey];
+const rv = idx===REVIEW_MONTH_IDX;
+const pl = m.label || monthLabels[idx] || ('Month ' + (idx+1));
+h += `<td class="yw${rv?' rev-col rev-start':''}${dc}"${da(idx,pl)}>${fmtKplain(m.w)}</td>`+
+`<td class="${rv?'rev-col':''}${dc}"${da(idx,pl)}>${fmtKplain(m[benchmarkKey])}</td>`+
+`<td class="mv${rv?' rev-col rev-end':''} ${varClass(mv)}${dc}"${da(idx,pl)}>${fmtK(mv)}</td>`;
+});
+h += '</tr>';
+});
+h += '</tbody></table>';
+return h;
+}
+
+function renderYearTable(rows, benchmarkKey, totalRow, sectionId){
+const drill = sectionId === 'sec-fyplan' || sectionId === 'sec-fyfcst';
+const benchmarkName = benchmarkKey === 'p' ? 'Plan' : 'Forecast';
+const varianceName = `Working vs ${benchmarkName}`;
+let h = '<table><thead><tr><th>Category</th>' +
+stackedHeader('Full Year', 'Working', 'yw tot-col') +
+stackedHeader('Full Year', benchmarkName, 'tot-col') +
+stackedHeader('Variance', varianceName, 'yv tot-col tot-end variance-header');
+['Q1','Q2','Q3','Q4'].forEach((q, idx) => {
+const rv = idx===REVIEW_Q_IDX;
+const reviewWorkingClass = `yw${rv?' rev-col rev-start':''}`;
+const reviewBenchmarkClass = `${rv?'rev-col':''}`;
+const reviewVarianceClass = `mv${rv?' rev-col rev-end':''} variance-header`;
+h += stackedHeader(q, 'Working', reviewWorkingClass) +
+stackedHeader(q, benchmarkName, reviewBenchmarkClass) +
+stackedHeader('Variance', varianceName, reviewVarianceClass);
+});
+h += '</tr></thead><tbody>';
+const totalRows = totalRow ? [{ ...totalRow, label: totalRow.label || 'Expense', rowType: 'expense' }] : [];
+const orderedRows = rows.filter(r => r.rowType !== 'expense').concat(totalRows);
+orderedRows.forEach(r => {
+const fyVar = r.total.w - r.total[benchmarkKey];
+const trCls = r.rowType === 'expense' ? 'tr-exp' : '';
+const dc = drill ? ' drill-cell' : '';
+const da = (period, periodLabel) => drill ? ` data-drill="1" data-scope="y" data-row-index="${r.index}" data-period="${period}" data-benchmark="${benchmarkKey}" data-label="${escapeHtml(cleanLabel(r.label))}" data-period-label="${escapeHtml(periodLabel)}"` : '';
+h += `<tr class="${trCls}"><td>${escapeHtml(cleanLabel(r.label))}</td>`+
+`<td class="yw tot-col${dc}"${da('fy','Full year')}>${fmtKplain(r.total.w)}</td>`+
+`<td class="tot-col${dc}"${da('fy','Full year')}>${fmtKplain(r.total[benchmarkKey])}</td>`+
+`<td class="yv tot-col tot-end ${varClass(fyVar)}${dc}"${da('fy','Full year')}>${fmtK(fyVar)}</td>`;
+r.quarters.forEach((q, idx) => {
+const qVar = q.w - q[benchmarkKey];
+const rv = idx===REVIEW_Q_IDX;
+const pl = q.label || ('Q' + (idx+1));
+h += `<td class="yw${rv?' rev-col rev-start':''}${dc}"${da(idx,pl)}>${fmtKplain(q.w)}</td>`+
+`<td class="${rv?'rev-col':''}${dc}"${da(idx,pl)}>${fmtKplain(q[benchmarkKey])}</td>`+
+`<td class="mv${rv?' rev-col rev-end':''} ${varClass(qVar)}${dc}"${da(idx,pl)}>${fmtK(qVar)}</td>`;
+});
+h += '</tr>';
+});
+h += '</tbody></table>';
+return h;
+}
+
+function renderDriverBlock(block){
+return `<div class="drv-block ${block.variance < 0 ? 'fav-block':'unfav-block'}" id="blk-${block.id}-wrap">
+<div class="drv-block-inner">
+<div class="drv-left">
+<button class="del-block" data-del-block="blk-${block.id}"><i class="ti ti-trash"></i></button>
+<div class="drv-label">${escapeHtml(cleanLabel(block.label))}</div>
+<div class="drv-amt ${block.variance<0?'drv-fav':'drv-unfav'}">${fmtK(block.variance)}</div>
+<div class="drv-benchmark">Working vs ${block.benchmarkKey==='p'?'Plan':'Forecast'}</div>
+<div class="drv-badge-wrap">${varianceBadge(block.variance)}</div>
+</div>
+<div class="drv-right" data-comment-container="${block.id}">
+<div class="drv-vendors-hdr">Vendor Drivers</div>
+${block.vendors.map((v,i) => renderVendorRow(block.id, i, v, block)).join('')}
+<div class="inline-add">
+<input class="add-comment-input" data-add-input="${block.id}" placeholder="Add comment row..." />
+<button class="mini-btn" data-add-comment="${block.id}"><i class="ti ti-plus"></i></button>
+</div>
+<div class="drv-footer">Review the underlying service, timing, and whether the current run-rate should carry through the rest of the period.</div>
+</div>
+</div>
+</div>`;
+}
+function renderVendorRow(blockId, idx, vendor, block){
+const rowId = `${blockId}-${idx}`;
+const glTag = vendor.isNV && vendor.gl ? ` <span class="vrow-gl">· ${escapeHtml(vendor.gl)}</span>` : '';
+// No Vendor line items that cause the block's variance (empty when nothing varies -> no toggle).
+let nvDetail = '';
+if(vendor.isNV && vendor.glCode && CURRENT_NV && block && block.months){
+const mini = nvMiniHtml(CURRENT_NV, vendor.glCode, block.months, block.benchmarkKey);
+if(mini) nvDetail = `<details class="nv-inline"><summary><i class="ti ti-list-details"></i> No Vendor line items</summary>${mini}</details>`;
+}
+return `<div class="vrow" id="${rowId}-row">
+<span style="width:8px;height:8px;border-radius:50%;background:${vendor.variance<0?'#16a34a':'#e11d48'};flex-shrink:0;margin-top:3px"></span>
+<div style="flex:1;min-width:0">
+<p style="font-size:11.5px;font-weight:600;color:#0f172a;margin-bottom:3px">${escapeHtml(vendor.name)}${glTag}</p>
+${nvDetail}
+<textarea class="vedit" rows="2" data-persist="comment:${rowId}">${escapeHtml(vendor.comment || '')}</textarea>
+</div>
+<span style="font-size:12px;font-weight:600;color:${vendor.variance<0?'#16a34a':'#e11d48'};flex-shrink:0;margin-top:2px;min-width:48px;text-align:right">${fmtK(vendor.variance)}</span>
+<button class="del-btn" data-del-row="${rowId}"><i class="ti ti-trash"></i></button>
+</div>`;
+}
+function renderAdditionalComments(id){
+return [].map(i => `<div class="comment-row" id="${id}-${i}-row"><textarea class="vedit" rows="2" data-persist="comment:${id}-${i}" placeholder="Additional comment..."></textarea><button class="del-btn" data-del-row="${id}-${i}"><i class="ti ti-trash"></i></button></div>`).join('') +
+`<div class="inline-add"><input class="add-comment-input" data-add-input="${id}" placeholder="Add comment row..." /><button class="mini-btn" data-add-comment="${id}"><i class="ti ti-plus"></i></button></div>`;
+}
+function renderNoActivity(id, icon, title, tag){
+return `<section class="sec" id="${id}"><div class="sec-hdr"><div class="sec-hdr-left"><span class="sec-ic"><i class="ti ${icon}"></i></span><span class="sec-title">${escapeHtml(title)}</span></div><span class="sec-tag">${escapeHtml(tag)}</span></div><div class="comment-block" style="text-align:center;padding:30px 16px;color:#64748b;font-size:14px;font-weight:600"><i class="ti ti-info-circle" style="font-size:20px;display:block;margin-bottom:8px;color:#94a3b8"></i>No activity registered for this period.</div></section>`;
+}
+function renderTE(model){
+if(!model.te) return renderNoActivity('sec-te','ti-plane','Travel & Expense','No activity');
+const headers = model.te.headers;
+const firstMonthIdx = 2;
+const lastMonthIdx = headers.length - 2;
+let h = `<section class="sec" id="sec-te"><div class="sec-hdr"><div class="sec-hdr-left"><span class="sec-ic"><i class="ti ti-plane"></i></span><span class="sec-title">Travel & Expense</span></div><span class="sec-tag">Employee and vendor detail</span></div><div class="tbl-outer"><table><thead><tr>`;
+headers.forEach((hdr, idx) => h += `<th class="${idx===firstMonthIdx?'te-q1':''} ${idx===lastMonthIdx?'te-q2':''} ${idx>=1?'te-center':''}">${escapeHtml(hdr)}</th>`);
+h += '</tr></thead><tbody>';
+model.te.rows.filter(row => Number.isFinite(row.grandTotal) && row.grandTotal !== 0).forEach(row => {
+h += `<tr><td>${escapeHtml(row.employee)}</td><td class="te-center">${escapeHtml(row.vendor)}</td>`;
+row.values.forEach((n, idx) => h += `<td class="te-center ${idx===0?'te-q1':''} ${idx===row.values.length-1?'te-q2':''}">${fmtKplain(n)}</td>`);
+h += `<td class="te-center">${fmtKplain(row.grandTotal)}</td></tr>`;
+});
+h += `<tr class="tr-exp"><td>${escapeHtml(model.te.totalRow.employee)}</td><td></td>`;
+model.te.totalRow.values.forEach((n, idx) => h += `<td class="te-center ${idx===0?'te-qt1':''} ${idx===model.te.totalRow.values.length-1?'te-qt2':''}">${fmtKplain(n)}</td>`);
+h += `<td class="te-center te-grand">${fmtKplain(model.te.totalRow.grandTotal)}</td></tr></tbody></table></div></section>`;
+return h;
+}
+function renderHC(model){
+if(!model.hc) return renderNoActivity('sec-hc','ti-users','Headcount Cost','No activity');
+const m = model.hc.movementCounts;
+const variance = model.hc.salaryAccrued.workTotal - model.hc.salaryAccrued.planTotal;
+return `<section class="sec" id="sec-hc">
+<div class="sec-hdr"><div class="sec-hdr-left"><span class="sec-ic"><i class="ti ti-users"></i></span><span class="sec-title">Headcount Cost</span></div><span class="sec-tag">Salary Accrued + movement</span></div>
+<div class="hc-grid">
+<div class="hc-card hc-card-wide hc-work">
+<div class="hc-summary-grid">
+<div class="hc-stat"><div class="kpi-label">Plan Total</div><div class="kpi-val kpi-neu">${fmtKplain(model.hc.salaryAccrued.planTotal)}</div></div>
+<div class="hc-stat"><div class="kpi-label">Working Total</div><div class="kpi-val ${variance<0?'kpi-fav':'kpi-unfav'}">${fmtKplain(model.hc.salaryAccrued.workTotal)}</div></div>
+<div class="hc-stat"><div class="kpi-label">Variance</div><div class="kpi-val ${variance<0?'kpi-fav':variance>0?'kpi-unfav':'kpi-neu'}">${fmtK(variance)}</div><div class="hc-badge-wrap">${varianceBadge(variance)}</div></div>
+</div>
+<div class="mini-kpi hc-quarter-grid">${model.hc.salaryAccrued.q.map((n,i)=>`<div><div class="k">Q${i+1}</div><div class="v">Plan ${fmtKplain(n)}</div><div class="v2">Working ${fmtKplain(model.hc.salaryAccrued.qWork[i])}</div></div>`).join('')}</div>
+</div>
+</div>
+<div class="sublbl">HC movement</div>
+<div class="tbl-wrap hc-move-wrap"><table class="hc-move-table"><thead><tr><th>Metric</th><th class="yw">Plan</th><th class="te-q2">Working</th><th class="yv">Variance (Working vs Plan)</th></tr></thead><tbody>
+${hcRow('Active Employees', m.activePlan, m.activeWork)}
+${hcRow('TBH Roles', m.tbhPlan, m.tbhWork)}
+${hcRow('New Hires (not in plan)', 0, m.newHires)}
+${hcRow('Ending HC', m.endingPlan, m.endingWork, true)}
+</tbody></table></div>
+<div class="sublbl">Employee commentary</div>
+<div>${model.hc.topVarianceEmployees.map((r,i)=>`<div class="hcrow" id="hc-${i}-row"><span style="width:8px;height:8px;border-radius:50%;background:${r.variance<0?'#16a34a':'#e11d48'};flex-shrink:0;margin-top:3px"></span><div style="flex:1"><p style="font-size:11.5px;font-weight:600;color:#0f172a;margin-bottom:3px">${escapeHtml(r.name)}</p><textarea class="hc-edit" rows="2" data-persist="comment:hc-${i}">${escapeHtml(r.comment)}</textarea></div><span style="font-size:12px;font-weight:600;color:${r.variance<0?'#16a34a':'#e11d48'};min-width:48px;text-align:right">${fmtK(r.variance)}</span><button class="del-btn" data-del-row="hc-${i}"><i class="ti ti-trash"></i></button></div>`).join('')}</div>
+</section>`;
+}
+function hcRow(label, plan, work, highlight){
+const variance = work - plan;
+return `<tr class="${highlight?'tr-exp':''}"><td>${escapeHtml(label)}</td><td class="yw">${plan}</td><td class="te-q2">${work}</td><td class="yv ${varClass(variance)}">${variance}</td></tr>`;
+}
+function renderActions(model){
+return `<section class="sec" id="sec-actions"><div class="sec-hdr"><div class="sec-hdr-left"><span class="sec-ic"><i class="ti ti-checklist"></i></span><span class="sec-title">Follow-up Actions</span></div><span id="actCtr" class="sec-tag">0 of 6 completed</span></div><div class="act-box" id="actList">${model.actions.map((a,i)=>`<div class="act-item" id="act-${i}"><input type="checkbox" class="act-cb" data-act-cb="act-${i}"><textarea class="act-text" rows="1" data-persist="action:act-${i}">${escapeHtml(a)}</textarea><button class="del-btn" data-del-row="act-${i}"><i class="ti ti-trash"></i></button></div>`).join('')}</div><button class="add-act" id="add-act"><i class="ti ti-plus"></i> Add action</button></section>`;
+}
+function bindInteractive(model){
+document.querySelectorAll('[data-del-row]').forEach(btn => btn.addEventListener('click', () => { const id = btn.dataset.delRow; const row = document.getElementById(id + '-row') || document.getElementById(id); if(row) row.classList.add('hidden'); saveState(); }));
+document.querySelectorAll('[data-del-block]').forEach(btn => btn.addEventListener('click', () => { const id = btn.dataset.delBlock; const row = document.getElementById(id + '-wrap') || document.getElementById(id + '-wrap'.replace('blk-','')); if(row) row.classList.add('hidden'); saveState(); }));
+document.querySelectorAll('[data-add-comment]').forEach(btn => btn.addEventListener('click', () => addCommentRow(btn.dataset.addComment)));
+document.getElementById('add-act').addEventListener('click', addAction);
+document.querySelectorAll('[data-act-cb]').forEach(cb => cb.addEventListener('change', saveState));
+document.querySelectorAll('[data-persist]').forEach(el => el.addEventListener('input', () => { autoResize(el); saveState(); }));
+if(!dom.root.dataset.drillBound){
+// One drill-down implementation for the live board and the exported HTML.
+// The live board reads the current model on every click.
+initDrilldown(dom.root, () => buildDrillData());
+dom.root.dataset.drillBound = '1';
+}
+updateActionCounter();
+document.querySelectorAll('textarea').forEach(autoResize);
+window.addEventListener('scroll', scrollSpy, { passive:true });
+}
+function addCommentRow(blockId){
+const input = document.querySelector(`[data-add-input="${blockId}"]`);
+const text = input ? input.value.trim() : '';
+const rowId = slug(blockId + '-' + Date.now());
+const row = document.createElement('div');
+row.className = 'comment-row';
+row.dataset.dynamic = '1';
+row.id = rowId + '-row';
+row.innerHTML = `<textarea class="vedit" rows="2" data-persist="comment:${rowId}">${escapeHtml(text)}</textarea><button class="del-btn" data-del-row="${rowId}"><i class="ti ti-trash"></i></button>`;
+const addWrap = input.closest('.inline-add');
+addWrap.parentNode.insertBefore(row, addWrap);
+row.querySelector('[data-del-row]').addEventListener('click', () => { row.classList.add('hidden'); saveState(); });
+row.querySelector('[data-persist]').addEventListener('input', e => { autoResize(e.target); saveState(); });
+autoResize(row.querySelector('textarea'));
+if(input) input.value = '';
+saveState();
+}
+function addAction(){
+const list = document.getElementById('actList');
+const id = 'act-' + Date.now();
+const div = document.createElement('div');
+div.className = 'act-item';
+div.dataset.dynamic = '1';
+div.id = id;
+div.innerHTML = `<input type="checkbox" class="act-cb" data-act-cb="${id}"><textarea class="act-text" rows="1" data-persist="action:${id}" placeholder="New action item..."></textarea><button class="del-btn" data-del-row="${id}"><i class="ti ti-trash"></i></button>`;
+list.appendChild(div);
+div.querySelector('[data-act-cb]').addEventListener('change', saveState);
+div.querySelector('[data-del-row]').addEventListener('click', () => { div.classList.add('hidden'); saveState(); updateActionCounter(); });
+div.querySelector('[data-persist]').addEventListener('input', e => { autoResize(e.target); saveState(); });
+autoResize(div.querySelector('textarea'));
+updateActionCounter();
+saveState();
+}
+function updateActionCounter(){
+const items = Array.from(document.querySelectorAll('.act-item')).filter(el => !el.classList.contains('hidden'));
+const done = items.filter(el => el.querySelector('.act-cb').checked).length;
+const ctr = document.getElementById('actCtr');
+if(ctr) ctr.textContent = `${done} of ${items.length} completed`;
+}
+function autoResize(el){ if(!el || el.tagName !== 'TEXTAREA') return; el.style.height='auto'; el.style.height = el.scrollHeight + 'px'; }
+function syncEditableValues(root){
+const scope = root || document;
+scope.querySelectorAll('textarea').forEach(t => { t.textContent = t.value; });
+scope.querySelectorAll('input').forEach(i => {
+if(i.type === 'checkbox' || i.type === 'radio'){
+if(i.checked) i.setAttribute('checked','checked');
+else i.removeAttribute('checked');
+}else{
+i.setAttribute('value', i.value);
+}
+});
+scope.querySelectorAll('select').forEach(select => {
+Array.from(select.options).forEach(option => {
+if(option.selected) option.setAttribute('selected','selected');
+else option.removeAttribute('selected');
+});
+});
+}
+function bindActionRows(){
+document.querySelectorAll('#actList .act-item [data-act-cb]').forEach(cb => {
+cb.addEventListener('change', saveState);
+});
+document.querySelectorAll('#actList .act-item [data-persist]').forEach(el => {
+el.addEventListener('input', () => { autoResize(el); saveState(); });
+});
+document.querySelectorAll('#actList .act-item [data-del-row]').forEach(btn => {
+btn.addEventListener('click', () => {
+const id = btn.dataset.delRow;
+const row = document.getElementById(id + '-row') || document.getElementById(id);
+if(row) row.classList.add('hidden');
+saveState();
+updateActionCounter();
+});
+});
+}
+function saveState(){
+if(!state.model) return;
+syncEditableValues(document);
+const key = storageKey();
+const payload = {
+comments: {},
+commentsMarkup: {},
+actions: {},
+actionMarkup: '',
+hidden: []
+};
+document.querySelectorAll('[data-persist]').forEach(el => payload.comments[el.dataset.persist] = el.value);
+document.querySelectorAll('[data-comment-container]').forEach(el => {
+  payload.commentsMarkup[el.dataset.commentContainer] = el.innerHTML;
+});
+document.querySelectorAll('[data-act-cb]').forEach(cb => payload.actions[cb.dataset.actCb] = cb.checked);
+document.querySelectorAll('.hidden[id]').forEach(el => payload.hidden.push(el.id));
+const actionList = document.getElementById('actList');
+if(actionList) payload.actionMarkup = actionList.innerHTML;
+localStorage.setItem(key, JSON.stringify(payload));
+updateActionCounter();
+toast('Board saved');
+}
+function bindRestoredCommentContainers(){
+document.querySelectorAll('[data-comment-container]').forEach(container => {
+container.querySelectorAll('[data-del-row]').forEach(btn => btn.addEventListener('click', () => {
+const id = btn.dataset.delRow;
+const row = document.getElementById(id + '-row') || document.getElementById(id);
+if(row) row.classList.add('hidden');
+saveState();
+}));
+container.querySelectorAll('[data-add-comment]').forEach(btn => btn.addEventListener('click', () => addCommentRow(btn.dataset.addComment)));
+container.querySelectorAll('[data-persist]').forEach(el => el.addEventListener('input', () => {
+autoResize(el);
+saveState();
+}));
+container.querySelectorAll('textarea').forEach(autoResize);
+});
+}
+function restoreSavedState(){
+const raw = localStorage.getItem(storageKey());
+if(!raw) return;
+try{
+const payload = JSON.parse(raw);
+let restoredCommentMarkup = false;
+Object.entries(payload.commentsMarkup || {}).forEach(([key, markup]) => {
+const container = Array.from(document.querySelectorAll('[data-comment-container]')).find(el => el.dataset.commentContainer === key);
+if(container){
+container.innerHTML = markup;
+restoredCommentMarkup = true;
+}
+});
+if(payload.actionMarkup){
+const actionList = document.getElementById('actList');
+if(actionList){
+actionList.innerHTML = payload.actionMarkup;
+bindActionRows();
+}
+}
+Object.entries(payload.comments || {}).forEach(([k,v]) => {
+const el = document.querySelector(`[data-persist="${cssEscape(k)}"]`);
+if(el){ el.value = v; autoResize(el); }
+});
+Object.entries(payload.actions || {}).forEach(([k,v]) => {
+const cb = document.querySelector(`[data-act-cb="${cssEscape(k)}"]`);
+if(cb) cb.checked = !!v;
+});
+if(restoredCommentMarkup) bindRestoredCommentContainers();
+(payload.hidden || []).forEach(id => {
+const el = document.getElementById(id);
+if(el) el.classList.add('hidden');
+});
+updateActionCounter();
+}catch(err){ console.warn(err); }
+}
+function storageKey(){
+return 'bva:' + slug(state.model.meta.badgeLabel);
+}
+function exportFileBase(){
+return `bva_${slug(state.model.meta.dashboardCode)}_${slug(state.model.meta.fyToken)}_${slug(state.model.meta.monthToken)}`;
+}
+async function fetchInlineCss(){
+try{
+const link = document.querySelector('link[href$="styles.css"]');
+const href = link ? link.href : './styles.css';
+const res = await fetch(href);
+if(res.ok) return await res.text();
+}catch(e){ console.warn('Could not fetch styles.css directly, falling back to loaded stylesheet rules.', e); }
+try{
+const sheet = Array.from(document.styleSheets).find(s => (s.href||'').indexOf('styles.css') !== -1);
+if(sheet) return Array.from(sheet.cssRules).map(r => r.cssText).join('\n');
+}catch(e){ console.warn('Could not read stylesheet rules for inline export.', e); }
+return '';
+}
+function inlineCssIntoClone(clone, cssText){
+if(!cssText) return;
+const styleTag = document.createElement('style');
+styleTag.textContent = cssText;
+const link = clone.querySelector('link[href$="styles.css"]');
+if(link) link.replaceWith(styleTag);
+else { const head = clone.querySelector('head'); if(head) head.appendChild(styleTag); }
+}
+function freezeCanvasesAsImages(clone){
+document.querySelectorAll('canvas[id]').forEach(liveCanvas => {
+let dataUrl;
+try{
+dataUrl = liveCanvas.toDataURL('image/png');
+}catch(e){
+console.warn('Could not snapshot canvas ' + liveCanvas.id, e);
+return;
+}
+const cloneCanvas = clone.querySelector('#' + liveCanvas.id);
+if(!cloneCanvas) return;
+const img = document.createElement('img');
+img.src = dataUrl;
+img.alt = liveCanvas.id;
+img.style.display = 'block';
+img.style.width = '100%';
+img.style.height = '100%';
+img.style.maxWidth = '100%';
+img.style.maxHeight = '100%';
+img.style.objectFit = 'contain';
+img.style.objectPosition = 'center';
+cloneCanvas.replaceWith(img);
+});
+}
+function stripLiveScripts(clone, keepPatterns){
+const keep = keepPatterns || [];
+clone.querySelectorAll('script[src]').forEach(s => {
+const src = s.getAttribute('src') || '';
+const shouldKeep = keep.some(p => src.indexOf(p) !== -1);
+if(!shouldKeep) s.remove();
+});
+}
+function buildExportScript(){
+return `(function(){
+function autoResize(el){ if(!el) return; el.style.height='auto'; el.style.height = el.scrollHeight + 'px'; }
+document.querySelectorAll('textarea').forEach(autoResize);
+document.querySelectorAll('textarea').forEach(function(el){ el.addEventListener('input', function(){ autoResize(el); }); });
+function updateActionCounter(){
+var items = Array.prototype.slice.call(document.querySelectorAll('.act-item')).filter(function(el){ return !el.classList.contains('hidden'); });
+var done = items.filter(function(el){ var cb = el.querySelector('.act-cb'); return cb && cb.checked; }).length;
+var ctr = document.getElementById('actCtr');
+if(ctr) ctr.textContent = done + ' of ' + items.length + ' completed';
+}
+document.querySelectorAll('[data-act-cb]').forEach(function(cb){ cb.addEventListener('change', updateActionCounter); });
+updateActionCounter();
+function navTo(sectionId, el){
+var target = document.getElementById(sectionId);
+if(!target) return;
+var top = target.getBoundingClientRect().top + window.scrollY - 20;
+window.scrollTo({ top: top, behavior: 'smooth' });
+document.querySelectorAll('aside nav ul li[data-nav]').forEach(function(li){ li.classList.remove('active'); });
+if(el) el.classList.add('active');
+}
+document.querySelectorAll('aside nav ul li[data-nav]').forEach(function(li){
+li.addEventListener('click', function(){ navTo(li.dataset.nav, li); });
+});
+function scrollSpy(){
+var sections = ['sec-overview','sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst','sec-te','sec-hc','sec-actions'];
+var navItems = document.querySelectorAll('aside nav ul li[data-nav]');
+var scrollY = window.scrollY + 80;
+var current = 0;
+sections.forEach(function(id, i){ var el = document.getElementById(id); if(el && el.offsetTop <= scrollY) current = i; });
+navItems.forEach(function(li){ li.classList.remove('active'); });
+if(navItems[current]) navItems[current].classList.add('active');
+}
+window.addEventListener('scroll', scrollSpy, { passive: true });
+})();`;
+}
+function appendExportScript(clone){
+const script = document.createElement('script');
+script.textContent = buildExportScript();
+const body = clone.querySelector('body');
+if(body) body.appendChild(script);
+}
+// Build a fully self-contained HTML string for the currently rendered board.
+// opts.interactive === true keeps Save / Download / add-line / trash controls
+// live inside the exported window (used for multi-board windows).
+async function buildStandaloneHtml(opts){
+const interactive = !!(opts && opts.interactive);
+const cssText = await fetchInlineCss();
+// Persist current field values into the DOM so the clone captures typed text.
+syncEditableValues(document.getElementById('dashboard-root'));
+const clone = document.documentElement.cloneNode(true);
+if(interactive){
+// Keep interactive controls; only remove things that make no sense in a
+// standalone window (workspace navigation, uploader, batch UI, open drill).
+clone.querySelectorAll('#back-nav, #home-nav, #budget-util-nav, .topbar-actions, #upload-shell, #drill-overlay, #fpa-bot-root, #fpa-bot-style').forEach(el => el.remove());
+freezeCanvasesAsImages(clone);
+stripLiveScripts(clone, ['html2canvas', 'jspdf']); // keep PDF libs for in-window export
+inlineCssIntoClone(clone, cssText);
+appendInteractiveScript(clone);
+appendDrillExportScript(clone);
+appendBotExportScript(clone);
+} else {
+clone.querySelectorAll('.hidden, .del-btn, .del-block, .add-act, .mini-btn, .ghost-btn, .topbar-actions, #save-nav, #download-nav, #download-pdf-nav, #back-nav, #home-nav, #drill-overlay, #upload-shell, #fpa-bot-root, #fpa-bot-style').forEach(el => el.remove());
+freezeCanvasesAsImages(clone);
+stripLiveScripts(clone);
+inlineCssIntoClone(clone, cssText);
+appendExportScript(clone);
+appendDrillExportScript(clone);
+appendBotExportScript(clone);
+}
+return '<!DOCTYPE html>\n' + clone.outerHTML;
+}
+// Inject the self-contained interactive bootstrap (Save / Download HTML /
+// Download PDF / add comment / add action / delete row+block / nav+scrollspy).
+function appendInteractiveScript(clone){
+const script = document.createElement('script');
+script.textContent = buildInteractiveBootstrap(storageKey(), exportFileBase());
+const body = clone.querySelector('body');
+if(body) body.appendChild(script);
+}
+// Returns a vanilla, dependency-free IIFE string that re-wires every editable
+// control inside an exported window. STORAGE_KEY / FILE_BASE are baked in so
+// each board window persists to its own localStorage slot.
+function buildInteractiveBootstrap(storageKeyStr, fileBaseStr){
+const KEY = JSON.stringify(storageKeyStr);
+const FILE = JSON.stringify(fileBaseStr);
+return `(function(){
+var STORAGE_KEY=${KEY},FILE_BASE=${FILE};
+function slug(s){return String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'');}
+function escapeHtml(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function autoResize(el){if(!el||el.tagName!=='TEXTAREA')return;el.style.height='auto';el.style.height=el.scrollHeight+'px';}
+function toast(m){var t=document.getElementById('toast');if(!t){t=document.createElement('div');t.id='toast';t.className='toast';document.body.appendChild(t);}t.textContent=m;t.classList.add('show');setTimeout(function(){t.classList.remove('show');},1800);}
+function updateActionCounter(){var items=Array.prototype.slice.call(document.querySelectorAll('.act-item')).filter(function(el){return !el.classList.contains('hidden');});var done=items.filter(function(el){var cb=el.querySelector('.act-cb');return cb&&cb.checked;}).length;var ctr=document.getElementById('actCtr');if(ctr)ctr.textContent=done+' of '+items.length+' completed';}
+function syncEditableValues(root){var scope=root||document;scope.querySelectorAll('textarea').forEach(function(el){el.textContent=el.value;});scope.querySelectorAll('input').forEach(function(el){if(el.type==='checkbox'||el.type==='radio'){if(el.checked)el.setAttribute('checked','checked');else el.removeAttribute('checked');}else{el.setAttribute('value',el.value);}});scope.querySelectorAll('select').forEach(function(select){Array.from(select.options).forEach(function(option){if(option.selected)option.setAttribute('selected','selected');else option.removeAttribute('selected');});});}
+function saveState(showToast){
+var payload={comments:{},commentsMarkup:{},actions:{},actionMarkup:'',hidden:[]};
+syncEditableValues(document);
+document.querySelectorAll('[data-persist]').forEach(function(el){payload.comments[el.dataset.persist]=el.value;});
+document.querySelectorAll('[data-comment-container]').forEach(function(el){payload.commentsMarkup[el.dataset.commentContainer]=el.innerHTML;});
+document.querySelectorAll('[data-act-cb]').forEach(function(el){payload.actions[el.dataset.actCb]=el.checked;});
+document.querySelectorAll('.hidden[id]').forEach(function(el){payload.hidden.push(el.id);});
+var actionList=document.getElementById('actList');if(actionList)payload.actionMarkup=actionList.innerHTML;
+try{localStorage.setItem(STORAGE_KEY,JSON.stringify(payload));updateActionCounter();if(showToast!==false)toast('Board saved');}catch(error){console.error(error);toast('Could not save board');}
+}
+function restoreSavedState(){
+var raw;try{raw=localStorage.getItem(STORAGE_KEY);}catch(error){return;}if(!raw)return;
+try{
+var payload=JSON.parse(raw);
+Object.keys(payload.commentsMarkup||{}).forEach(function(key){document.querySelectorAll('[data-comment-container]').forEach(function(el){if(el.dataset.commentContainer===key)el.innerHTML=payload.commentsMarkup[key];});});
+var actionList=document.getElementById('actList');if(actionList&&payload.actionMarkup)actionList.innerHTML=payload.actionMarkup;
+Object.keys(payload.comments||{}).forEach(function(key){document.querySelectorAll('[data-persist]').forEach(function(el){if(el.dataset.persist===key){el.value=payload.comments[key];autoResize(el);}});});
+Object.keys(payload.actions||{}).forEach(function(key){document.querySelectorAll('[data-act-cb]').forEach(function(el){if(el.dataset.actCb===key)el.checked=!!payload.actions[key];});});
+(payload.hidden||[]).forEach(function(id){var el=document.getElementById(id);if(el)el.classList.add('hidden');});
+updateActionCounter();document.querySelectorAll('textarea').forEach(autoResize);
+}catch(error){console.error(error);}
+}
+function addCommentRow(blockId){var input=document.querySelector('[data-add-input="'+blockId+'"]');var text=input?input.value.trim():'';var rowId=slug(blockId+'-'+Date.now());var row=document.createElement('div');row.className='comment-row';row.dataset.dynamic='1';row.id=rowId+'-row';row.innerHTML='<textarea class="vedit" rows="2" data-persist="comment:'+rowId+'"></textarea><button class="del-btn" data-del-row="'+rowId+'"><i class="ti ti-trash"></i></button>';var ta=row.querySelector('textarea');ta.value=text;ta.textContent=text;var addWrap=input?input.closest('.inline-add'):null;if(!addWrap)return;addWrap.parentNode.insertBefore(row,addWrap);autoResize(ta);if(input)input.value='';saveState(true);}
+function addAction(){var list=document.getElementById('actList');if(!list)return;var id='act-'+Date.now();var div=document.createElement('div');div.className='act-item';div.dataset.dynamic='1';div.id=id;div.innerHTML='<input type="checkbox" class="act-cb" data-act-cb="'+id+'"><textarea class="act-text" rows="1" data-persist="action:'+id+'" placeholder="New action item..."></textarea><button class="del-btn" data-del-row="'+id+'"><i class="ti ti-trash"></i></button>';list.appendChild(div);autoResize(div.querySelector('textarea'));updateActionCounter();saveState(true);}
+function downloadHtml(){try{syncEditableValues(document);var clone=document.documentElement.cloneNode(true);clone.querySelectorAll('#toast').forEach(function(el){el.remove();});var html='<!DOCTYPE html>\\n'+clone.outerHTML;var blob=new Blob([html],{type:'text/html'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=FILE_BASE+'.html';a.click();URL.revokeObjectURL(a.href);toast('HTML downloaded');}catch(error){console.error(error);toast('Could not export HTML');}}
+function downloadPdf(){if(typeof html2canvas==='undefined'||!window.jspdf){toast('PDF libraries did not load');return;}saveState(false);var target=document.querySelector('.main-workspace');if(!target){toast('Could not find dashboard content');return;}var hiddenEls=Array.prototype.slice.call(target.querySelectorAll('.hidden, .del-btn, .del-block, .add-act, .mini-btn, .ghost-btn, .topbar-actions, #back-nav, #home-nav'));var restore=hiddenEls.map(function(el){return [el,el.style.display];});var aside=document.querySelector('aside');var asideDisplay=aside?aside.style.display:null;var prevML=target.style.marginLeft,prevW=target.style.width;toast('Building PDF...');hiddenEls.forEach(function(el){el.style.display='none';});if(aside)aside.style.display='none';target.style.marginLeft='0';target.style.width='100%';setTimeout(function(){html2canvas(target,{scale:2,useCORS:true,backgroundColor:'#f8fafc'}).then(function(canvas){var jsPDF=window.jspdf.jsPDF;var pdf=new jsPDF('p','pt','a4');var pageWidth=pdf.internal.pageSize.getWidth();var pageHeight=pdf.internal.pageSize.getHeight();var ratio=canvas.width/pageWidth;var pageHeightPx=Math.max(1,Math.floor(pageHeight*ratio));var rendered=0,first=true;while(rendered<canvas.height){var sh=Math.min(pageHeightPx,canvas.height-rendered);var sc=document.createElement('canvas');sc.width=canvas.width;sc.height=sh;sc.getContext('2d').drawImage(canvas,0,rendered,canvas.width,sh,0,0,canvas.width,sh);var img=sc.toDataURL('image/jpeg',0.92);if(!first)pdf.addPage();pdf.addImage(img,'JPEG',0,0,pageWidth,sh/ratio);rendered+=sh;first=false;}pdf.save(FILE_BASE+'.pdf');toast('PDF downloaded');}).catch(function(error){console.error(error);toast('Could not export PDF');}).then(function(){restore.forEach(function(pair){pair[0].style.display=pair[1];});if(aside)aside.style.display=asideDisplay;target.style.marginLeft=prevML;target.style.width=prevW;});},60);}
+function navTo(sectionId,el){var target=document.getElementById(sectionId);if(!target)return;var top=target.getBoundingClientRect().top+window.scrollY-20;window.scrollTo({top:top,behavior:'smooth'});document.querySelectorAll('aside nav ul li[data-nav]').forEach(function(li){li.classList.remove('active');});if(el)el.classList.add('active');}
+function scrollSpy(){var sections=['sec-overview','sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst','sec-te','sec-hc','sec-actions'];var navItems=document.querySelectorAll('aside nav ul li[data-nav]');var sy=window.scrollY+80;var current=0;sections.forEach(function(id,i){var el=document.getElementById(id);if(el&&el.offsetTop<=sy)current=i;});navItems.forEach(function(li){li.classList.remove('active');});if(navItems[current])navItems[current].classList.add('active');}
+document.body.addEventListener('click',function(e){var target=e.target;if(!target.closest)return;var delRow=target.closest('[data-del-row]');if(delRow){var id=delRow.dataset.delRow;var row=document.getElementById(id+'-row')||document.getElementById(id);if(row)row.classList.add('hidden');saveState(true);updateActionCounter();return;}var delBlock=target.closest('[data-del-block]');if(delBlock){var wrap=document.getElementById(delBlock.dataset.delBlock+'-wrap');if(wrap)wrap.classList.add('hidden');saveState(true);return;}var addComment=target.closest('[data-add-comment]');if(addComment){addCommentRow(addComment.dataset.addComment);return;}if(target.closest('#add-act')){addAction();return;}if(target.closest('#save-nav')){saveState(true);return;}if(target.closest('#download-nav')){downloadHtml();return;}if(target.closest('#download-pdf-nav')){downloadPdf();return;}var nav=target.closest('aside nav ul li[data-nav]');if(nav){navTo(nav.dataset.nav,nav);return;}});
+document.body.addEventListener('input',function(e){if(e.target&&e.target.matches&&e.target.matches('[data-persist]')){autoResize(e.target);saveState(false);}});
+document.body.addEventListener('change',function(e){if(e.target&&e.target.matches&&e.target.matches('[data-act-cb]')){updateActionCounter();saveState(false);}});
+document.querySelectorAll('aside nav ul li[data-nav]').forEach(function(li){li.addEventListener('click',function(){navTo(li.dataset.nav,li);});});
+window.addEventListener('scroll',scrollSpy,{passive:true});
+restoreSavedState();updateActionCounter();document.querySelectorAll('textarea').forEach(autoResize);
+})();`;
+}
+
+async function downloadHtml(){
+if(!state.model){ toast('Build a dashboard first'); return; }
+saveState();
+const nav = document.getElementById('download-nav');
+try{
+if(nav) nav.classList.add('disabled-nav');
+const html = await buildStandaloneHtml();
+const blob = new Blob([html], { type:'text/html' });
+const a = document.createElement('a');
+a.href = URL.createObjectURL(blob);
+a.download = `${exportFileBase()}.html`;
+a.click();
+URL.revokeObjectURL(a.href);
+toast('HTML downloaded');
+}catch(err){
+console.error(err);
+toast('Could not export HTML');
+}finally{
+if(nav) nav.classList.remove('disabled-nav');
+}
+}
+// ---------- Multi-board generation ----------
+async function onGenerate(){
+showError('');
+if(dom.launcher){ dom.launcher.classList.add('hidden'); dom.launcher.innerHTML = ''; }
+if(state.boardCount === 1){
+await buildDashboard(state.boards[0]);
+return;
+}
+await buildAllBoards();
+}
+// Validate BU+month uniqueness across boards. Returns an error string or null.
+function validateBoardKeys(){
+const seen = new Map();
+for(let i = 0; i < state.boards.length; i++){
+const files = state.boards[i];
+let meta = null;
+try{ meta = parseMeta(files.quarter.name); }catch(e){}
+if(!meta){ return `Board ${i+1}: could not read the business unit/month from the Quarter filename.`; }
+const key = slug(meta.dashboardCode) + '|' + slug(meta.monthToken) + '|' + slug(meta.fyToken);
+if(seen.has(key)){
+const other = seen.get(key) + 1;
+return `Boards ${other} and ${i+1} are the same board (${meta.dashboardCode} · ${meta.monthToken} ${meta.fyToken}). Use a different business unit, or the same BU with a different month.`;
+}
+seen.set(key, i);
+}
+return null;
+}
+async function buildAllBoards(){
+const err = validateBoardKeys();
+if(err){ showError(err); toast('Duplicate board detected'); return; }
+dom.buildBtn.disabled = true;
+const originalLabel = dom.buildBtn.innerHTML;
+state.generated = [];
+try{
+for(let i = 0; i < state.boards.length; i++){
+dom.buildBtn.innerHTML = `<i class="ti ti-loader-2"></i> Building ${i+1} / ${state.boards.length}...`;
+const parsed = await parseFiles(state.boards[i]);
+const model = deriveModel(parsed);
+state.model = model;
+renderDashboard(model);
+restoreSavedState();
+document.getElementById('upload-shell').classList.add('hidden');
+dom.root.classList.remove('hidden');
+// Let charts paint before snapshotting.
+await new Promise(r => setTimeout(r, 550));
+const html = await buildStandaloneHtml({ interactive:true });
+state.generated.push({
+title: model.meta.dashboardCode,
+subtitle: `${model.meta.monthToken} ${model.meta.fyToken} · ${model.meta.currentQuarterLabel}`,
+fileBase: exportFileBase(),
+html
+});
+}
+// Return to the upload shell and show launcher buttons.
+unmountAnalystBot();
+dom.root.classList.add('hidden');
+dom.root.innerHTML = '';
+state.model = null;
+document.getElementById('upload-shell').classList.remove('hidden');
+if(dom.backNav) dom.backNav.classList.add('hidden');
+if(dom.homeNav) dom.homeNav.classList.remove('hidden');
+renderLauncher();
+toast(`${state.generated.length} boards ready`);
+}catch(e){
+console.error(e);
+showError(e.message || 'Could not build one of the boards. Check the feeds and try again.');
+}finally{
+dom.buildBtn.disabled = false;
+updateBuildButton();
+}
+}
+function renderLauncher(){
+if(!dom.launcher) return;
+const cards = state.generated.map((g, i) => `
+<button type="button" class="launch-btn" data-launch="${i}">
+<span class="lb-ic"><i class="ti ti-external-link"></i></span>
+<span class="lb-body">
+<span class="lb-title">Open Board ${i+1}</span>
+<span class="lb-sub">${escapeHtml(g.title)} · ${escapeHtml(g.subtitle)}</span>
+</span>
+</button>
+`).join('');
+dom.launcher.innerHTML = `
+<div class="launcher-hdr">
+<i class="ti ti-circle-check"></i>
+${state.generated.length} boards generated
+</div>
+<div class="launcher-actions">
+<button type="button" class="launcher-action primary" data-open-package>
+<i class="ti ti-layout-tabs"></i>
+Open Board Package
+</button>
+<button type="button" class="launcher-action" data-download-package>
+<i class="ti ti-file-zip"></i>
+Download ZIP
+</button>
+</div>
+<div class="launch-grid">${cards}</div>
+<div class="launcher-note">
+Open Board Package lets you edit each board in its own tab.
+Download ZIP captures the current comments, actions and changes.
+</div>
+`;
+dom.launcher.classList.remove('hidden');
+dom.launcher.querySelectorAll('[data-launch]').forEach(btn => {
+btn.addEventListener('click', () => {
+openGeneratedBoard(Number(btn.dataset.launch), btn);
+});
+});
+const openPackageBtn = dom.launcher.querySelector('[data-open-package]');
+if(openPackageBtn){
+openPackageBtn.addEventListener('click', openGeneratedPackage);
+}
+const downloadPackageBtn = dom.launcher.querySelector('[data-download-package]');
+if(downloadPackageBtn){
+downloadPackageBtn.addEventListener('click', downloadGeneratedPackage);
+}
+dom.launcher.scrollIntoView({ behavior:'smooth', block:'nearest' });
+}
+function openGeneratedBoard(index, btn){
+const g = state.generated[index];
+if(!g){ toast('Board not found'); return; }
+const w = window.open('', '_blank');
+if(!w){ toast('Pop-up blocked — allow pop-ups and click again'); return; }
+try{
+w.document.open();
+w.document.write(g.html);
+w.document.close();
+state.openedWindows.set(w, index);
+w.document.title = `${g.title} — ${g.subtitle}`;
+if(btn){ btn.classList.add('opened'); }
+}catch(e){
+console.error(e);
+toast('Could not open the board window');
+}
+}
+function snapshotBoardDocument(sourceDoc){
+if(!sourceDoc || !sourceDoc.documentElement) return null;
+const clone = sourceDoc.documentElement.cloneNode(true);
+const sourceFields = sourceDoc.querySelectorAll('textarea,input,select');
+const clonedFields = clone.querySelectorAll('textarea,input,select');
+
+sourceFields.forEach((source, index) => {
+const target = clonedFields[index];
+if(!target) return;
+if(source.tagName === 'TEXTAREA'){
+target.textContent = source.value;
+}else if(source.type === 'checkbox' || source.type === 'radio'){
+if(source.checked) target.setAttribute('checked','checked');
+else target.removeAttribute('checked');
+}else if(source.tagName === 'SELECT'){
+Array.from(target.options).forEach((option, optionIndex) => {
+const selected = source.options[optionIndex] && source.options[optionIndex].selected;
+option.selected = selected;
+if(selected) option.setAttribute('selected','selected');
+else option.removeAttribute('selected');
+});
+}else{
+target.setAttribute('value', source.value);
+}
+});
+
+clone.querySelectorAll('#toast').forEach(element => element.remove());
+return '<!DOCTYPE html>\n' + clone.outerHTML;
+}
+
+function syncOpenedBoardsToState(){
+state.openedWindows.forEach((index, boardWindow) => {
+try{
+if(boardWindow && !boardWindow.closed && boardWindow.document && state.generated[index]){
+const html = snapshotBoardDocument(boardWindow.document);
+if(html) state.generated[index].html = html;
+}
+}catch(error){
+console.warn('Could not sync an opened board before ZIP export.', error);
+}
+});
+}
+
+function packageRecords(){
+const seen = new Set();
+return state.generated.reduce((out, g, i) => {
+const fileName = `${g.fileBase || `bva_board_${i+1}`}.html`;
+if(seen.has(fileName)) return out;
+seen.add(fileName);
+out.push({
+title: g.title,
+subtitle: g.subtitle,
+fileName,
+html: g.html
+});
+return out;
+}, []);
+}
+function openGeneratedPackage(){
+const boards = packageRecords();
+const w = window.open('', '_blank');
+if(!w){
+toast('Pop-up blocked — allow pop-ups and try again');
+return;
+}
+w.document.open();
+w.document.write(buildPackageHubHtml(boards));
+w.document.close();
+}
+async function downloadGeneratedPackage(){
+syncOpenedBoardsToState();
+if(typeof JSZip === 'undefined'){
+toast('JSZip did not load');
+return;
+}
+const boards = packageRecords();
+const zip = new JSZip();
+boards.forEach(board => {
+zip.file(board.fileName, board.html);
+});
+zip.file('index.html', buildPackageHubHtml(boards));
+const blob = await zip.generateAsync({ type:'blob' });
+const url = URL.createObjectURL(blob);
+const link = document.createElement('a');
+link.href = url;
+link.download = 'bva_boards.zip';
+link.click();
+setTimeout(() => URL.revokeObjectURL(url), 1000);
+toast('ZIP downloaded');
+}
+function encodeBase64Utf8(value){
+const bytes = new TextEncoder().encode(String(value == null ? '' : value));
+let binary = '';
+for(let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+return btoa(binary);
+}
+
+function buildPackageHubHtml(boards){
+const boardFixCss = `
+<style id="bva-package-board-fix">
+html,
+body{
+width:100%!important;
+min-width:0!important;
+margin:0!important;
+padding:0!important;
+overflow-x:hidden!important;
+}
+body{
+display:flex!important;
+min-height:100vh!important;
+background:#f7f9fd!important;
+}
+aside{
+display:flex!important;
+width:244px!important;
+position:fixed!important;
+left:0!important;
+top:0!important;
+height:100vh!important;
+z-index:200!important;
+}
+.main-workspace{
+display:block!important;
+width:calc(100% - 244px)!important;
+max-width:none!important;
+margin-left:244px!important;
+padding:28px 30px 56px!important;
+overflow-x:hidden!important;
+}
+.trend-wrap,
+.wf-wrap{
+position:relative!important;
+width:100%!important;
+max-width:100%!important;
+overflow:hidden!important;
+}
+.trend-wrap img,
+.wf-wrap img,
+.trend-wrap canvas,
+.wf-wrap canvas{
+display:block!important;
+width:100%!important;
+max-width:100%!important;
+height:100%!important;
+max-height:100%!important;
+object-fit:contain!important;
+object-position:center!important;
+}
+</style>`;
+
+const packagePayload = {
+  boards: boards.map(board => ({
+    title: board.title,
+    subtitle: board.subtitle,
+    fileName: board.fileName,
+    htmlBase64: encodeBase64Utf8(board.html)
+  }))
+};
+const packageData = encodeBase64Utf8(JSON.stringify(packagePayload));
+
+return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BvA Board Package</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+*{box-sizing:border-box}
+html,
+body{
+width:100%;
+height:100%;
+margin:0;
+padding:0;
+overflow:hidden;
+}
+body{
+font-family:Inter,Arial,sans-serif;
+background:#eef2fb;
+color:#0f172a;
+}
+.hub{
+width:100%;
+height:100vh;
+max-width:none;
+margin:0;
+background:#fff;
+border:0;
+border-radius:0;
+box-shadow:none;
+overflow:hidden;
+display:flex;
+flex-direction:column;
+}
+.hub-header{
+display:flex;
+justify-content:space-between;
+align-items:center;
+gap:16px;
+padding:18px 24px;
+border-bottom:1px solid #e9eef7;
+flex-shrink:0;
+}
+.hub-title{font-size:22px;font-weight:800}
+.hub-sub{margin-top:5px;color:#64748b;font-size:12px}
+.hub-actions{display:flex;gap:9px}
+.hub-btn{border:1px solid #cbd5e1;border-radius:9px;padding:10px 14px;background:#fff;color:#334155;font-weight:800;cursor:pointer}
+.hub-btn.primary{background:#4f46e5;color:#fff;border-color:#4f46e5}
+.tabs{display:flex;gap:6px;overflow-x:auto;padding:12px 20px;border-bottom:1px solid #e9eef7;background:#f8fafc;flex-shrink:0}
+.tab{border:1px solid #cbd5e1;border-radius:9px;padding:9px 14px;background:#fff;color:#475569;font-weight:800;cursor:pointer;white-space:nowrap}
+.tab.active{background:#4f46e5;border-color:#4f46e5;color:#fff}
+.status{padding:7px 22px;color:#64748b;font-size:11px;border-bottom:1px solid #e9eef7;flex-shrink:0}
+.frames{flex:1;min-height:0;height:auto;overflow:hidden}
+.board-frame{display:none;width:100%;height:100%;min-height:0;border:0;background:#f7f9fd}
+.board-frame.active{display:block}
+</style>
+</head>
+<body>
+<div class="hub">
+  <div class="hub-header">
+    <div>
+      <div class="hub-title">BvA Board Package</div>
+      <div class="hub-sub">Each tab contains an independent editable board.</div>
+    </div>
+    <div class="hub-actions">
+      <button class="hub-btn primary" id="download-zip">Download ZIP</button>
+    </div>
+  </div>
+  <div class="tabs" id="tabs"></div>
+  <div class="status" id="status"></div>
+  <div class="frames" id="frames"></div>
+</div>
+<script id="bva-package-data">window.__BVA_PACKAGE_DATA__ = ${JSON.stringify(packageData)};</script>
+<script>
+(function(){
+  function decodeBase64Utf8(value){
+    var binary = atob(value || '');
+    var bytes = new Uint8Array(binary.length);
+    for(var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    if(window.TextDecoder) return new TextDecoder('utf-8').decode(bytes);
+    var escaped = '';
+    for(var j = 0; j < bytes.length; j++) escaped += '%' + ('00' + bytes[j].toString(16)).slice(-2);
+    return decodeURIComponent(escaped);
+  }
+
+  function readBoards(){
+    try{
+      var payload = JSON.parse(decodeBase64Utf8(window.__BVA_PACKAGE_DATA__));
+      return (payload.boards || []).map(function(board){
+        return {
+          title: board.title || '',
+          subtitle: board.subtitle || '',
+          fileName: board.fileName || 'board.html',
+          html: decodeBase64Utf8(board.htmlBase64 || '')
+        };
+      });
+    }catch(error){
+      console.error('Could not decode BvA package data.', error);
+      return [];
+    }
+  }
+
+  var boards = readBoards();
+  var tabs = document.getElementById('tabs');
+  var frames = document.getElementById('frames');
+  var status = document.getElementById('status');
+
+  boards.forEach(function(board, index){
+    var tab = document.createElement('button');
+    tab.className = 'tab';
+    tab.textContent = board.title || ('Board ' + (index + 1));
+    tabs.appendChild(tab);
+
+    var frame = document.createElement('iframe');
+    frame.className = 'board-frame';
+    frame.dataset.index = index;
+    frame.srcdoc = board.html;
+    frames.appendChild(frame);
+
+    tab.addEventListener('click', function(){ activate(index); });
+  });
+
+  function activate(index){
+    tabs.querySelectorAll('.tab').forEach(function(tab, i){
+      tab.classList.toggle('active', i === index);
+    });
+    frames.querySelectorAll('.board-frame').forEach(function(frame, i){
+      frame.classList.toggle('active', i === index);
+    });
+    var board = boards[index];
+    status.textContent = board ? board.title + ' · ' + board.subtitle : '';
+  }
+
+  function waitForFrame(frame){
+    if(frame.contentDocument && frame.contentDocument.readyState === 'complete'){
+      return Promise.resolve();
+    }
+    return new Promise(function(resolve){
+      frame.addEventListener('load', resolve, { once:true });
+    });
+  }
+
+  function snapshotFrame(frame){
+    var sourceDoc = frame.contentDocument;
+    if(!sourceDoc) throw new Error('Could not read board frame');
+
+    var clone = sourceDoc.documentElement.cloneNode(true);
+    var sourceFields = sourceDoc.querySelectorAll('textarea,input,select');
+    var clonedFields = clone.querySelectorAll('textarea,input,select');
+
+    sourceFields.forEach(function(source, index){
+      var target = clonedFields[index];
+      if(!target) return;
+
+      if(source.tagName === 'TEXTAREA'){
+        target.textContent = source.value;
+      }else if(source.type === 'checkbox' || source.type === 'radio'){
+        if(source.checked) target.setAttribute('checked', 'checked');
+        else target.removeAttribute('checked');
+      }else if(source.tagName === 'SELECT'){
+        Array.from(target.options).forEach(function(option, optionIndex){
+          var selected = source.options[optionIndex] && source.options[optionIndex].selected;
+          option.selected = selected;
+          if(selected) option.setAttribute('selected', 'selected');
+          else option.removeAttribute('selected');
+        });
+      }else{
+        target.setAttribute('value', source.value);
+      }
+    });
+
+    clone.querySelectorAll('#toast').forEach(function(element){ element.remove(); });
+    return '<!DOCTYPE html>\\n' + clone.outerHTML;
+  }
+
+  function encodeBase64Utf8(value){
+    var bytes = new TextEncoder().encode(String(value == null ? '' : value));
+    var binary = '';
+    for(var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  }
+
+  async function downloadZip(){
+    if(typeof JSZip === 'undefined'){
+      alert('JSZip could not be loaded.');
+      return;
+    }
+
+    var frameList = Array.from(frames.querySelectorAll('.board-frame'));
+    await Promise.all(frameList.map(waitForFrame));
+
+    var currentBoards = frameList.map(function(frame, index){
+      return {
+        title: boards[index].title,
+        subtitle: boards[index].subtitle,
+        fileName: boards[index].fileName,
+        html: snapshotFrame(frame)
+      };
+    });
+
+    var zip = new JSZip();
+    currentBoards.forEach(function(board){ zip.file(board.fileName, board.html); });
+    zip.file('index.html', buildUpdatedIndex(currentBoards));
+
+    var blob = await zip.generateAsync({ type:'blob' });
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement('a');
+    link.href = url;
+    link.download = 'bva_boards_updated.zip';
+    link.click();
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+  }
+
+  function buildUpdatedIndex(updatedBoards){
+    var payload = {
+      boards: updatedBoards.map(function(board){
+        return {
+          title: board.title,
+          subtitle: board.subtitle,
+          fileName: board.fileName,
+          htmlBase64: encodeBase64Utf8(board.html)
+        };
+      })
+    };
+    var encoded = encodeBase64Utf8(JSON.stringify(payload));
+    var clone = document.documentElement.cloneNode(true);
+    var dataScript = clone.querySelector('#bva-package-data');
+    if(dataScript){
+      dataScript.textContent = 'window.__BVA_PACKAGE_DATA__ = ' + JSON.stringify(encoded) + ';';
+    }
+    var clonedTabs = clone.querySelector('#tabs');
+    var clonedFrames = clone.querySelector('#frames');
+    var clonedStatus = clone.querySelector('#status');
+    if(clonedTabs) clonedTabs.innerHTML = '';
+    if(clonedFrames) clonedFrames.innerHTML = '';
+    if(clonedStatus) clonedStatus.textContent = '';
+    return '<!DOCTYPE html>\\n' + clone.outerHTML;
+  }
+
+  document.getElementById('download-zip').addEventListener('click', downloadZip);
+  if(boards.length) activate(0);
+})();
+</script>
+</body>
+</html>`;
+}
+
+async function downloadPdf(){
+if(!state.model){ toast('Build a dashboard first'); return; }
+if(typeof html2canvas === 'undefined' || !window.jspdf){
+toast('PDF libraries did not load — check your connection and try again');
+return;
+}
+saveState();
+const nav = document.getElementById('download-pdf-nav');
+const target = document.querySelector('.main-workspace');
+if(!target){ toast('Could not find dashboard content'); return; }
+const hiddenEls = Array.from(target.querySelectorAll('.hidden, .del-btn, .del-block, .add-act, .mini-btn, .ghost-btn, .topbar-actions, #back-nav, #home-nav'));
+const restoreDisplay = hiddenEls.map(el => [el, el.style.display]);
+const aside = document.querySelector('aside');
+const asideDisplay = aside ? aside.style.display : null;
+const prevMarginLeft = target.style.marginLeft;
+const prevWidth = target.style.width;
+try{
+if(nav) nav.classList.add('disabled-nav');
+toast('Building PDF…');
+hiddenEls.forEach(el => { el.style.display = 'none'; });
+if(aside) aside.style.display = 'none';
+target.style.marginLeft = '0';
+target.style.width = '100%';
+await new Promise(r => setTimeout(r, 60));
+const canvas = await html2canvas(target, { scale: 2, useCORS: true, backgroundColor: '#f8fafc' });
+const { jsPDF } = window.jspdf;
+const pdf = new jsPDF('p', 'pt', 'a4');
+const pageWidth = pdf.internal.pageSize.getWidth();
+const pageHeight = pdf.internal.pageSize.getHeight();
+const ratio = canvas.width / pageWidth;
+const pageHeightPx = Math.max(1, Math.floor(pageHeight * ratio));
+let renderedHeight = 0;
+let first = true;
+while(renderedHeight < canvas.height){
+const sliceHeight = Math.min(pageHeightPx, canvas.height - renderedHeight);
+const sliceCanvas = document.createElement('canvas');
+sliceCanvas.width = canvas.width;
+sliceCanvas.height = sliceHeight;
+const ctx = sliceCanvas.getContext('2d');
+ctx.drawImage(canvas, 0, renderedHeight, canvas.width, sliceHeight, 0, 0, canvas.width, sliceHeight);
+const imgData = sliceCanvas.toDataURL('image/jpeg', 0.92);
+const sliceHeightPt = sliceHeight / ratio;
+if(!first) pdf.addPage();
+pdf.addImage(imgData, 'JPEG', 0, 0, pageWidth, sliceHeightPt);
+renderedHeight += sliceHeight;
+first = false;
+}
+pdf.save(`${exportFileBase()}.pdf`);
+toast('PDF downloaded');
+}catch(err){
+console.error(err);
+toast('Could not export PDF');
+}finally{
+restoreDisplay.forEach(([el, disp]) => { el.style.display = disp; });
+if(aside) aside.style.display = asideDisplay;
+target.style.marginLeft = prevMarginLeft;
+target.style.width = prevWidth;
+if(nav) nav.classList.remove('disabled-nav');
+}
+}
+function openBudgetUtilization(){
+if(!state.model || !state.model.opex){ toast('Upload the OPEX Feed to view Budget Utilization'); return; }
+const payload = {
+meta: state.model.meta,
+opex: state.model.opex,
+savedAt: Date.now()
+};
+try{ localStorage.setItem('bva:budget-utilization', JSON.stringify(payload)); }
+catch(e){ console.warn(e); }
+window.open('./budget-utilization/index.html', 'BudgetUtilization', 'width=1200,height=800,scrollbars=yes,resizable=yes');
+}
+function navTo(sectionId, el){
+const target = document.getElementById(sectionId);
+if(!target) return;
+const top = target.getBoundingClientRect().top + window.scrollY - 20;
+window.scrollTo({ top, behavior:'smooth' });
+document.querySelectorAll('aside nav ul li[data-nav]').forEach(li => li.classList.remove('active'));
+if(el) el.classList.add('active');
+}
+function scrollSpy(){
+const sections = ['sec-overview','sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst','sec-te','sec-hc','sec-actions'];
+const navItems = document.querySelectorAll('aside nav ul li[data-nav]');
+const scrollY = window.scrollY + 80;
+let current = 0;
+sections.forEach((id, i) => { const el = document.getElementById(id); if(el && el.offsetTop <= scrollY) current = i; });
+navItems.forEach(li => li.classList.remove('active'));
+if(navItems[current]) navItems[current].classList.add('active');
+}
+function decodeHtmlEntities(str){
+const ta = document.createElement('textarea');
+ta.innerHTML = str;
+return ta.value;
+}
+function parseEmbeddedJson(node){
+const raw = node ? String(node.textContent || '').trim() : '';
+if(!raw) return null;
+try{ return JSON.parse(raw); }catch(e){}
+try{ return JSON.parse(decodeHtmlEntities(raw)); }catch(e){}
+return null;
+}
+function destroyChart(id){
+if(chartRefs[id]){
+try{ chartRefs[id].destroy(); }catch(e){}
+delete chartRefs[id];
+}
+}
+function renderCharts(model){
+renderTrendChart(model.year.trend);
+['sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst'].forEach(id => {
+const node = document.getElementById(id + '-wf-data');
+const data = parseEmbeddedJson(node);
+if(!data) return;
+const padded = waterfallBounds(data.baseStart, data.vars, data.workingEnd);
+buildWF(id + '-wf', data.labels, data.baseStart, data.vars, data.workingEnd, padded.min, padded.max);
+});
+}
+function waterfallBounds(base, vars, end){
+let run = base;
+let min = Math.min(base, end), max = Math.max(base, end);
+vars.forEach(v => { run += v; min = Math.min(min, run); max = Math.max(max, run); });
+const pad = Math.max(50000, Math.ceil((max - min) * 0.1 / 50000) * 50000 || 50000);
+return { min: Math.floor((min - pad) / 50000) * 50000, max: Math.ceil((max + pad) / 50000) * 50000 };
+}
+function buildWF(canvasId, labels, baseVal, varsArr, endVal, yMin, yMax) {
+var bases=[], bars=[], bgs=[], run=baseVal;
+bases.push(0); bars.push(baseVal); bgs.push('#4f46e5');
+varsArr.forEach(function(v) {
+bases.push(v < 0 ? run + v : run);
+bars.push(Math.abs(v));
+bgs.push(v < 0 ? '#16a34a' : '#e11d48');
+run += v;
+});
+bases.push(0); bars.push(endVal); bgs.push('#4f46e5');
+var canvas = document.getElementById(canvasId); if (!canvas) return;
+destroyChart(canvasId);
+chartRefs[canvasId] = new Chart(canvas, {
+type: 'bar',
+data: {
+labels: labels,
+datasets: [
+{ data: bases, backgroundColor: 'rgba(0,0,0,0)', borderWidth: 0, datalabels: { display: false } },
+{ data: bars, backgroundColor: bgs, borderWidth: 0, borderRadius: 6,
+datalabels: {
+display: true, anchor: 'end', align: 'end', offset: 2,
+color: '#334155', font: { size: 13, weight: '700' },
+formatter: function(v, ctx) {
+var i = ctx.dataIndex;
+if (i === 0 || i === bars.length - 1) return '$' + Math.round((bases[i] + v) / 1000) + 'K';
+var o = varsArr[i - 1];
+return (o > 0 ? '+' : '-') + '$' + Math.round(Math.abs(o) / 1000) + 'K';
+}
+}
+}
+]
+},
+options: {
+responsive: true, maintainAspectRatio: false, layout: { padding: { top: 44 } },
+scales: {
+x: { stacked: true, grid: { display: false }, ticks: { font: { size: 9.5 }, color: '#64748b', autoSkip: false, maxRotation: 20 } },
+y: { stacked: true, min: yMin, max: yMax, grid: { color: '#f1f5f9' }, ticks: { font: { size: 9 }, color: '#64748b', callback: function(v) { return '$' + (v/1000).toFixed(0) + 'K'; } } }
+},
+plugins: { legend: { display: false }, tooltip: { enabled: false } }
+}
+});
+}
+function renderTrendChart(trend){
+const canvas = document.getElementById('trendC');
+if(!canvas) return;
+const allVals = [...trend.working, ...trend.plan].filter(n => Number.isFinite(n));
+const min = allVals.length ? Math.floor((Math.min(...allVals) - 50000)/50000)*50000 : 0;
+const max = allVals.length ? Math.ceil((Math.max(...allVals) + 50000)/50000)*50000 : 100000;
+destroyChart('trendC');
+chartRefs['trendC'] = new Chart(canvas, {
+type: 'line',
+data: {
+labels: trend.labels,
+datasets: [
+{ label: 'Working', data: trend.working, borderColor: '#16a34a', backgroundColor: 'rgba(22,163,74,0.14)', fill: true, borderWidth: 3, pointRadius: 4, pointBackgroundColor: '#16a34a', tension: 0.35, datalabels: { display: false } },
+{ label: 'Plan', data: trend.plan, borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,0.10)', fill: true, borderWidth: 2.5, pointRadius: 4, pointBackgroundColor: '#2563eb', borderDash: [6,4], tension: 0.35, datalabels: { display: false } }
+]
+},
+options: {
+responsive: true, maintainAspectRatio: false,
+scales: {
+x: { grid: { display: false }, ticks: { font: { size: 10 }, color: '#64748b' } },
+y: { min, max, grid: { color: '#f1f5f9' }, ticks: { font: { size: 9 }, color: '#64748b', callback: function(v) { return '$' + (v/1000).toFixed(0) + 'K'; } } }
+},
+plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(c) { return c.dataset.label + ': $' + Math.round(c.raw/1000) + 'K'; } } } }
+}
+});
+}
+// ---------- Vendor drill-down (piloto Q vs Plan) ----------
+function buildGlMap(rows){
+const map = {}; let pending = [];
+for(let i=0;i<rows.length;i++){
+const r = rows[i];
+if(r.rowType === 'vendor' || r.rowType === 'novendor'){ pending.push(r.index); continue; }
+if(r.rowType === 'gl'){ pending.forEach(idx => { map[idx] = r.label; }); pending = []; continue; }
+if(r.rowType === 'l2' || r.rowType === 'expense'){ pending = []; }
+}
+return map;
+}
+// Self-contained drill-down used by the exported HTML (app.js is stripped on export,
+// so this function carries its own helpers + reads vendor data from an embedded object).
+// data may be an object (export) or a function returning it (live board, read on each click).
+// nvMiniHtml (No Vendor line items) is resolved from the enclosing scope when present.
+function initDrilldown(root, data){
+var getData = typeof data === 'function' ? data : function(){ return data; };
+data = getData() || { quarter: [], year: [] };
+function nvCode(label){ var m = String(label || '').match(/^\s*(\d{5,})/); return m ? m[1] : ''; }
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function fmtK(n){ if(!isFinite(n)||n===0) return '—'; var r=Math.round(n/1000); if(r===0) return '$0K'; var a=Math.abs(r).toLocaleString('en-US'); return r>0?('+$'+a+'K'):('-$'+a+'K'); }
+function fmtKplain(n){ if(!isFinite(n)||n===0) return '—'; var r=Math.round(n/1000); if(r===0) return '$0K'; var a=Math.abs(r).toLocaleString('en-US'); return r<0?('($'+a+'K)'):('$'+a+'K'); }
+function cleanLabel(s){ return String(s==null?'':s).replace(/^Total\s+/,''); }
+function collect(rows, l2Index, flex){
+var idx=rows.findIndex(function(r){return r.index===l2Index;});
+var vend=[], gl=[];
+for(var i=idx-1;i>=0;i--){ var row=rows[i]; if(row.rowType==='l2'||row.rowType==='expense') break; if(row.rowType==='vendor'||row.rowType==='novendor') vend.push(row); else if(row.rowType==='gl') gl.push(row); }
+return flex ? (vend.length?vend:gl) : vend;
+}
+function glmap(rows){ var m={},pending=[]; for(var i=0;i<rows.length;i++){ var r=rows[i]; if(r.rowType==='vendor'||r.rowType==='novendor'){pending.push(r.index);continue;} if(r.rowType==='gl'){for(var k=0;k<pending.length;k++) m[pending[k]]=r.label; pending=[];continue;} if(r.rowType==='l2'||r.rowType==='expense'){pending=[];} } return m; }
+function qVals(row, period, bk){ if(period==='q') return {working:row.total.w, benchmark:row.total[bk]}; var m=row.months[period]; return {working:m.w, benchmark:m[bk]}; }
+function yVals(row, period, bk){ if(period==='fy') return {working:row.total.w, benchmark:row.total[bk]}; var q=row.quarters[period]; return {working:q.w, benchmark:q[bk]}; }
+function computeQ(rowIndex, period, bk){
+var rows=data.quarter||[]; var gm=glmap(rows); var t=rows.find(function(r){return r.index===rowIndex;}); var vr;
+if(t&&t.rowType==='expense') vr=rows.filter(function(r){return r.rowType==='vendor'||r.rowType==='novendor';}); else vr=collect(rows,rowIndex,false);
+return vr.map(function(row){ var val=qVals(row,period,bk); return {name:cleanLabel(row.label), gl:gm[row.index]||'', nv:row.rowType==='novendor'?nvCode(gm[row.index]):'', working:val.working, benchmark:val.benchmark, variance:val.working-val.benchmark}; }).sort(function(a,b){return Math.abs(b.variance)-Math.abs(a.variance);});
+}
+function computeY(rowIndex, period, bk){
+var rows=data.year||[]; var gm=glmap(rows); var t=rows.find(function(r){return r.index===rowIndex;}); var vr;
+if(t&&t.rowType==='expense'){ vr=rows.filter(function(r){return r.rowType==='vendor'||r.rowType==='novendor';}); if(!vr.length) vr=rows.filter(function(r){return r.rowType==='gl';}); } else vr=collect(rows,rowIndex,true);
+return vr.map(function(row){ var val=yVals(row,period,bk); return {name:cleanLabel(row.label), gl:gm[row.index]||'', nv:row.rowType==='novendor'?nvCode(gm[row.index]):'', working:val.working, benchmark:val.benchmark, variance:val.working-val.benchmark}; }).sort(function(a,b){return Math.abs(b.variance)-Math.abs(a.variance);});
+}
+var ctx=null;
+function ensure(){
+var o=document.getElementById('drill-overlay'); if(o) return o;
+o=document.createElement('div'); o.id='drill-overlay'; o.className='drill-overlay';
+o.innerHTML='<div class="drill-panel" id="drill-panel" role="dialog" aria-modal="true"></div>';
+document.body.appendChild(o);
+o.addEventListener('click', function(e){ if(e.target===o) close(); });
+document.addEventListener('keydown', function(e){ if(e.key==='Escape') close(); });
+return o;
+}
+function close(){ var o=document.getElementById('drill-overlay'); var p=document.getElementById('drill-panel'); if(p)p.classList.remove('show'); if(o)o.classList.remove('show'); }
+function open(cell){
+data = getData() || { quarter: [], year: [] };
+var rowIndex=Number(cell.dataset.rowIndex), scope=cell.dataset.scope||'q', bk=cell.dataset.benchmark, bl=bk==='p'?'Plan':'Forecast', vendors, threshold, months;
+if(scope==='y'){ var py=cell.dataset.period==='fy'?'fy':Number(cell.dataset.period); vendors=computeY(rowIndex,py,bk); threshold=75; months = py==='fy' ? [0,1,2,3,4,5,6,7,8,9,10,11] : [py*3, py*3+1, py*3+2]; }
+else { var pq=cell.dataset.period==='q'?'q':Number(cell.dataset.period); vendors=computeQ(rowIndex,pq,bk); threshold=25; var qi=data.qIdx||0; months = pq==='q' ? [qi*3, qi*3+1, qi*3+2] : [qi*3+pq]; }
+render({title:cell.dataset.label, periodLabel:cell.dataset.periodLabel, benchmarkLabel:bl, vendors:vendors, threshold:threshold, months:months, bk:bk});
+}
+function render(c){
+ctx=Object.assign({mode:'materiality', threshold:25, search:''}, c);
+var overlay=ensure(), panel=document.getElementById('drill-panel');
+panel.innerHTML=''
++'<div class="drill-hdr"><div><h3>'+esc(c.title)+'</h3><div class="drill-sub">'+esc(c.periodLabel)+' · Working vs '+esc(c.benchmarkLabel)+'</div></div><button class="drill-close" id="drill-close">&times;</button></div>'
++'<div class="drill-controls"><div class="drill-seg"><button class="drill-seg-btn" data-mode="materiality">By materiality</button><button class="drill-seg-btn" data-mode="activity" title="With Activity (excluding zero)">With activity</button><button class="drill-seg-btn" data-mode="all">Show all</button></div>'
++'<div class="drill-thr" id="drill-thr-wrap"><span>± $</span><input type="number" id="drill-thr" min="0" step="5" value="'+c.threshold+'" /><span>K</span></div></div>'
++'<div class="drill-search" id="drill-search-wrap"><i class="ti ti-search"></i><input type="text" id="drill-search" placeholder="Search vendor by id or name..." /></div>'
++'<div class="drill-body" id="drill-body"></div>';
+panel.querySelector('#drill-close').addEventListener('click', close);
+panel.querySelectorAll('.drill-seg-btn').forEach(function(btn){ btn.addEventListener('click', function(){ ctx.mode=btn.dataset.mode; body(); }); });
+var thr=panel.querySelector('#drill-thr'); if(thr) thr.addEventListener('input', function(){ var val=parseFloat(thr.value); ctx.threshold=isFinite(val)?val:0; if(ctx.mode==='materiality') body(); });
+var s=panel.querySelector('#drill-search'); if(s) s.addEventListener('input', function(){ ctx.search=s.value; if(ctx.mode==='all') body(); });
+var be=panel.querySelector('#drill-body'); if(be) be.addEventListener('click', function(e){ var nb=e.target.closest('.drill-nv-btn'); if(nb){ var nr=nb.closest('.drill-bar-row'); if(nr) nr.classList.toggle('nv-open'); return; } var b=e.target.closest('.drill-gl-btn'); if(!b) return; var row=b.closest('.drill-bar-row'); if(!row) return; var open=row.classList.toggle('gl-open'); var ic=b.querySelector('i'); if(ic) ic.className=open?'ti ti-eye-off':'ti ti-eye'; });
+body(); overlay.classList.add('show'); requestAnimationFrame(function(){ panel.classList.add('show'); });
+}
+function body(){
+var panel=document.getElementById('drill-panel'); if(!panel||!ctx) return;
+var bd=panel.querySelector('#drill-body');
+panel.querySelectorAll('.drill-seg-btn').forEach(function(b){ b.classList.toggle('active', b.dataset.mode===ctx.mode); });
+var tw=panel.querySelector('#drill-thr-wrap'); if(tw) tw.style.display=ctx.mode==='materiality'?'flex':'none';
+var sw=panel.querySelector('#drill-search-wrap'); if(sw) sw.style.display=ctx.mode==='all'?'flex':'none';
+var all=ctx.vendors;
+var totW=all.reduce(function(s,v){return s+v.working;},0), totB=all.reduce(function(s,v){return s+v.benchmark;},0), totVar=totW-totB, util=totB?Math.round(totW/totB*100):null;
+var thrAbs=(ctx.threshold||0)*1000, shown;
+if(ctx.mode==='materiality') shown=all.filter(function(v){return Math.abs(v.variance)>=thrAbs;});
+else if(ctx.mode==='activity') shown=all.filter(function(v){return v.working!==0||v.benchmark!==0;});
+else { shown=all; var q=(ctx.search||'').trim().toLowerCase(); if(q) shown=shown.filter(function(v){return v.name.toLowerCase().indexOf(q)!==-1;}); }
+var maxVal=Math.max.apply(null,[1].concat(shown.map(function(v){return Math.max(Math.abs(v.working),Math.abs(v.benchmark));})));
+function bar(v){
+var wPct=Math.min(100,Math.abs(v.working)/maxVal*100), bPct=Math.min(100,Math.abs(v.benchmark)/maxVal*100), over=v.variance>0;
+var vu=v.benchmark?((v.variance>0?'+':'')+Math.round(v.variance/v.benchmark*100)+'%'):(v.working?'not in plan':'—');
+var nvh=(v.nv && data.nv && typeof nvMiniHtml==='function') ? nvMiniHtml(data.nv, v.nv, ctx.months||[], ctx.bk||'p') : '';
+return '<div class="drill-bar-row'+(nvh?' nv-open':'')+'"><div class="drill-bar-top"><span class="drill-bar-left"><span class="drill-bar-name">'+esc(v.name)+'</span>'+(v.gl?'<button class="drill-gl-btn" type="button" title="Show GL account"><i class="ti ti-eye"></i></button>':'')+(nvh?'<button class="drill-nv-btn" type="button" title="Show No Vendor line items"><i class="ti ti-list-details"></i></button>':'')+'</span><span class="drill-bar-fig">'+fmtKplain(v.working)+' / '+fmtKplain(v.benchmark)+'</span></div><div class="drill-track"><div class="drill-fill '+(over?'unfav':'fav')+'" style="width:'+wPct+'%"></div>'+(v.benchmark?'<div class="drill-plan-marker" style="left:'+bPct+'%"></div>':'')+'</div><div class="drill-util '+(over?'var-unfav':'var-fav')+'">'+esc(vu)+' vs '+esc(ctx.benchmarkLabel.toLowerCase())+' · '+fmtK(v.variance)+'</div>'+(v.gl?'<div class="drill-gl-line"><i class="ti ti-receipt-2"></i>GL account · '+esc(v.gl)+'</div>':'')+(nvh?'<div class="drill-nv">'+nvh+'</div>':'')+'</div>';
+}
+var unfav=shown.filter(function(v){return v.variance>0;}).sort(function(a,b){return b.variance-a.variance;});
+var fav=shown.filter(function(v){return v.variance<0;}).sort(function(a,b){return a.variance-b.variance;});
+var neu=shown.filter(function(v){return v.variance===0;});
+function gh(cls,main,note,count){ return '<div class="drill-group-hdr '+cls+'"><span class="ghl"><span class="gmain">'+main+'</span><span class="gnote">('+note+')</span></span><span class="gcount">'+count+'</span></div>'; }
+var bars='';
+if(fav.length) bars+=gh('fav','Favorable','Savings',fav.length)+fav.map(bar).join('');
+if(unfav.length) bars+=gh('unfav','Unfavorable','Overspend',unfav.length)+unfav.map(bar).join('');
+if(neu.length) bars+=gh('neu','No Variance','In line with Plan',neu.length)+neu.map(bar).join('');
+var ct;
+if(ctx.mode==='materiality') ct='Showing '+shown.length+' of '+all.length+' vendors · materiality ± $'+ctx.threshold+'K';
+else if(ctx.mode==='activity') ct='Showing '+shown.length+' of '+all.length+' vendors · with activity (excluding zero)';
+else { var q2=(ctx.search||'').trim(); ct=q2?('Showing '+shown.length+' of '+all.length+' vendors · search "'+q2+'"'):('Showing all '+all.length+' vendors'); }
+bd.innerHTML='<div class="drill-summary"><div class="ds"><div class="k">Working</div><div class="val">'+fmtKplain(totW)+'</div></div><div class="ds"><div class="k">'+esc(ctx.benchmarkLabel)+'</div><div class="val">'+fmtKplain(totB)+'</div></div><div class="ds"><div class="k">Variance</div><div class="val '+(totVar<0?'kpi-fav':totVar>0?'kpi-unfav':'kpi-neu')+'">'+fmtK(totVar)+'</div></div><div class="ds"><div class="k">Utilization</div><div class="val">'+(util===null?'—':util+'%')+'</div></div></div><div class="drill-count">'+esc(ct)+'</div>'+(shown.length?bars:('<div class="drill-empty">'+(ctx.mode==='materiality'?'No vendors within this materiality range.':'No vendors to display.')+'</div>'));
+}
+var container=root||document;
+container.addEventListener('click', function(e){ var t=e.target; if(!t||!t.closest) return; var cell=t.closest('[data-drill="1"]'); if(cell) open(cell); });
+}
+// Build the minimal vendor dataset embedded into the exported HTML.
+function buildDrillData(){
+var m = state.model || {};
+function slim(rows, kind){
+return (rows||[]).map(function(r){
+var o = { index:r.index, rowType:r.rowType, label:r.label, total:{ w:r.total.w, p:r.total.p, f:r.total.f } };
+if(kind==='q') o.months = (r.months||[]).map(function(x){ return { w:x.w, p:x.p, f:x.f }; });
+else o.quarters = (r.quarters||[]).map(function(x){ return { w:x.w, p:x.p, f:x.f }; });
+return o;
+});
+}
+return { quarter: slim(m.quarter && m.quarter.allRows, 'q'), year: slim(m.year && m.year.allRows, 'y'), qIdx: Math.max(0, quarterNum(m.meta && m.meta.currentQuarterLabel)), nv: m.nv || null };
+}
+function appendDrillExportScript(clone){
+try{
+var json = JSON.stringify(buildDrillData()).replace(/</g, '\\u003c');
+var script = document.createElement('script');
+script.textContent = '(function(){var nvSlice=(' + nvSlice.toString() + ');var nvMiniHtml=(' + nvMiniHtml.toString() + ');(' + initDrilldown.toString() + ')(document, ' + json + ');})();';
+var body = clone.querySelector('body');
+if(body) body.appendChild(script);
+}catch(e){ console.warn('Could not embed drill-down into export.', e); }
+}
+// ---------- FP&A analyst bot (rule-based, see analyst-bot.js) ----------
+// Compact snapshot of the board data the bot needs. Row arrays are [Working, Plan, Forecast].
+function buildBotData(){
+const m = state.model;
+if(!m || !m.year || !m.year.allRows) return null;
+const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+const trip = o => [r2(o && o.w), r2(o && o.p), r2(o && o.f)];
+const rows = m.year.allRows.map(r => ({
+i: r.index, t: r.rowType, l: r.label,
+T: trip(r.total), Q: (r.quarters || []).map(trip), M: (r.months || []).map(trip)
+}));
+const first = m.year.allRows.find(r => r.months && r.months.length === 12);
+const monthLabels = first ? first.months.map(x => x.label) : [];
+const quarterLabels = first ? first.quarters.map(x => x.label) : [];
+const monthIdx = monthLabels.findIndex(l => normalizeMonth(l) === m.meta.monthToken);
+const hc = m.hc ? {
+salary: { planTotal: r2(m.hc.salaryAccrued.planTotal), workTotal: r2(m.hc.salaryAccrued.workTotal), q: m.hc.salaryAccrued.q.map(r2), qWork: m.hc.salaryAccrued.qWork.map(r2) },
+employees: m.hc.employeeRows.map(e => ({ n: e.name, p: r2(e.planTotal), w: r2(e.workTotal), tbh: !!e.isTbh })),
+moves: m.hc.movementCounts
+} : null;
+const te = m.te ? {
+headers: m.te.headers.slice(2, -1),
+rows: m.te.rows.map(r => ({ e: r.employee, v: r.vendor, vals: r.values.map(r2), g: r2(r.grandTotal) })),
+total: { vals: m.te.totalRow.values.map(r2), g: r2(m.te.totalRow.grandTotal) }
+} : null;
+return {
+meta: { code: m.meta.dashboardCode, fy: m.meta.fyToken, month: m.meta.monthToken, quarter: m.meta.currentQuarterLabel,
+planLabel: `${m.meta.fyToken} Plan`, fcstLabel: m.meta.forecastLabel, monthIdx },
+monthLabels, quarterLabels, rows, hc, te, hasOpex: !!m.opex,
+nv: m.nv || null
+};
+}
+function mountAnalystBot(){
+if(typeof initAnalystBot !== 'function') return;
+try{ initAnalystBot(buildBotData()); }catch(e){ console.warn('Could not start the FP&A analyst bot.', e); }
+}
+function unmountAnalystBot(){
+['fpa-bot-root','fpa-bot-style'].forEach(id => { const el = document.getElementById(id); if(el) el.remove(); });
+}
+function appendBotExportScript(clone){
+if(typeof initAnalystBot !== 'function') return;
+try{
+const json = JSON.stringify(buildBotData()).replace(/</g, '\\u003c');
+const script = document.createElement('script');
+script.textContent = '(' + initAnalystBot.toString() + ')(' + json + ');';
+const body = clone.querySelector('body');
+if(body) body.appendChild(script);
+}catch(e){ console.warn('Could not embed the FP&A analyst bot into export.', e); }
+}
+function quarterNum(label){ const m = String(label||'').match(/Q\s*([1-4])/i); return m ? parseInt(m[1],10)-1 : -1; }
+function cleanLabel(label){ return String(label||'').replace(/^Total\s+/,''); }
+function slug(s){ return String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,''); }
+function escapeHtml(str){ return String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function cssEscape(str){ return String(str).replace(/"/g,'\\"'); }
+})();
