@@ -212,20 +212,24 @@ function initAnalystBot(DATA){
     var proj = months.filter(function(m){ return m > RM; }), closed = months.filter(function(m){ return m <= RM; });
     function det(ms){ return bk === 'f' ? ms.filter(function(m){ return m >= NVFS; }) : ms; }
     var bd = g.board || { w:[], p:[], f:[] };
-    var o = { proj:proj, closed:closed, rows:[], plan:[], detW:0, detB:0,
+    var o = { proj:proj, closed:closed, rows:[], plan:[], detW:0, detB:0, outB:0,
       boardW:nvSum(bd.w, proj), boardB:nvSum(bd[bk], proj), cW:nvSum(bd.w, closed), cB:nvSum(bd[bk], closed) };
     g.items.forEach(function(it){
       if(!it.nv) return;
       var w = nvSum(it.w, proj), b = nvSum(it[bk], det(proj));
       o.detW += w; o.detB += b;
-      if(Math.abs(w - b) >= 1) o.rows.push({ it:it, w:w, b:b, v:w - b });   // only lines that cause variance
-      var cb = nvSum(it[bk], det(closed));
+      // vs Plan: only Working line items (Plan beside); vs Forecast: Working and previous-forecast line items.
+      var inScope = bk === 'f' ? (Math.abs(w) >= 0.5 || Math.abs(b) >= 0.5) : Math.abs(w) >= 0.5;
+      if(inScope && Math.abs(w - b) >= 1) o.rows.push({ it:it, w:w, b:b, v:w - b });   // only lines that cause variance
+      else if(!inScope) o.outB += b;   // Plan on lines with no Working: not listed, kept so the total reconciles
+      // Closed months: Working is actuals without lines; only the previous forecast has lines there.
+      var cb = bk === 'f' ? nvSum(it[bk], det(closed)) : 0;
       if(Math.abs(cb) >= 0.5) o.plan.push({ it:it, b:cb });
     });
     o.rows.sort(function(a, b){ return Math.abs(b.v) - Math.abs(a.v); });
     o.plan.sort(function(a, b){ return Math.abs(b.b) - Math.abs(a.b); });
     o.unW = o.boardW - o.detW; o.unB = o.boardB - o.detB; o.unV = o.unW - o.unB;
-    o.has = o.rows.length > 0 || (!!g.board && Math.abs(o.unV) >= 1) || (!!g.board && o.closed.length > 0 && Math.abs(o.cW - o.cB) >= 1);
+    o.has = o.rows.length > 0 || Math.abs(o.outB) >= 1 || (!!g.board && Math.abs(o.unV) >= 1) || (!!g.board && o.closed.length > 0 && Math.abs(o.cW - o.cB) >= 1);
     return o;
   }
   // Names of the line items that move a GL away from its benchmark in one month (sign > 0: above).
@@ -956,19 +960,20 @@ function initAnalystBot(DATA){
     var o = nvSplit(g, monthsOf(P), bk), bn = bk === 'f' ? 'FCST' : 'Plan', t = 2500;
     if(!o.has) return '';
     var h = '<div class="fb-sub">' + (full ? esc(g.label) : 'No Vendor line items causing the variance · ' + esc(pLabel(P))) + '</div>';
-    if(o.proj.length && (o.rows.length || (g.board && Math.abs(o.unV) >= 1))){
+    if(o.proj.length && (o.rows.length || Math.abs(o.outB) >= 1 || (g.board && Math.abs(o.unV) >= 1))){
       h += '<table class="fb-t"><thead><tr><th>' + esc(rangeLbl(o.proj)) + '</th><th>Working</th><th>' + bn + '</th><th>Var</th></tr></thead><tbody>';
       o.rows.slice(0, 6).forEach(function(r){
         var tg = Math.abs(r.b) < 0.5 ? 'not in ' + bn : Math.abs(r.w) < 0.5 ? 'no Working' : '';
         h += '<tr><td>' + esc(r.it.d) + (tg ? '<small>' + tg + '</small>' : '') + '</td><td>' + fm(r.w) + '</td><td>' + fm(r.b) + '</td><td>' + vspan(r.v, t) + '</td></tr>';
       });
       if(o.rows.length > 6) h += '<tr class="fb-more"><td colspan="4">+ ' + (o.rows.length - 6) + ' more</td></tr>';
+      if(Math.abs(o.outB) >= 1) h += '<tr class="fb-bufrow"><td>' + bn + ' on lines with no Working</td><td>$0</td><td>' + fm(o.outB) + '</td><td>' + vspan(-o.outB, t) + '</td></tr>';
       if(g.board && Math.abs(o.unV) >= 1) h += '<tr class="fb-bufrow"><td>Not explained by line items</td><td>' + fm(o.unW) + '</td><td>' + fm(o.unB) + '</td><td>' + vspan(o.unV, t) + '</td></tr>';
       h += '</tbody></table>';
     }
     if(o.closed.length && g.board && Math.abs(o.cW - o.cB) >= 1){
       h += '<p class="fb-dim">' + esc(rangeLbl(o.closed)) + ' are closed: actual No Vendor ' + fm(o.cW) + ' vs ' + fm(o.cB) + ' ' + bn + ' (' + vspan(o.cW - o.cB, t) + '). Actuals carry no line detail'
-        + (o.plan.length ? '; planned lines: ' + o.plan.slice(0, 3).map(function(r){ return esc(r.it.d) + ' ' + fm(r.b); }).join(', ') + (o.plan.length > 3 ? ', …' : '') : '') + '.</p>';
+        + (o.plan.length ? '; previous forecast lines: ' + o.plan.slice(0, 3).map(function(r){ return esc(r.it.d) + ' ' + fm(r.b); }).join(', ') + (o.plan.length > 3 ? ', …' : '') : '') + '.</p>';
     }
     return h;
   }
@@ -982,7 +987,7 @@ function initAnalystBot(DATA){
     withItems.forEach(function(g){ var o = nvSplit(g, ms, bk); tw += o.detW; tb += o.boardW; if(g.board) uw += o.unW; });
     if(proj.length && withItems.length) h += '<p>In the projected months (' + esc(rangeLbl(proj)) + '), line items explain <b>' + fm(tw) + '</b> of ' + fm(tb) + ' No Vendor Working' + (Math.abs(uw) >= 0.5 ? '; <b>' + fm(uw) + '</b> is not explained by line items.' : ', so it fully reconciles.') + '</p>';
     else if(!proj.length) h += '<p>All months in ' + esc(pLabel(P)) + ' are closed. No Vendor actuals carry no line detail, so I show the planned lines next to the actual total.</p>';
-    NV.warnings.concat(NV.notes).forEach(function(n){ h += '<p class="fb-dim">' + esc(n) + '</p>'; });
+    NV.warnings.concat(bk === 'f' ? NV.notes : []).forEach(function(n){ h += '<p class="fb-dim">' + esc(n) + '</p>'; });
     var shown = 0, quiet = [];
     withItems.forEach(function(g){ var bh = nvBlock(g, P, bk, true); if(bh){ h += bh; shown++; } else quiet.push(g.label); });
     if(!withItems.length) h += '<p>There are no No Vendor line items' + (scope ? ' for ' + esc(scope.name) : '') + ' in the feed.</p>';
