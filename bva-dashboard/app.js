@@ -442,9 +442,8 @@ return { meta: meta || {}, rows: wb.rows, workbook: wb.workbook, sheet: wb.sheet
 //   header row A : attribute labels (Account, Vendor, Description, Contract Start Date, Contract End Date, Amount)
 //   header row B : month labels under Amount ("Feb 26", "Mar 26", ...)
 //   header row C : scenario per column (Working, FY27 Plan, 6+6 Forecast)
-// Every attribute repeats once per scenario, because the same line number can hold a
-// different item in each scenario. Items are therefore matched by GL + vendor + description,
-// never by line number.
+// Every attribute repeats once per scenario; the same line number can hold a different item in
+// each scenario. Lines are merged by GL + vendor + description (descriptions from Working, see below).
 function nvCellDate(x){
 if(x === null || x === undefined || x === '') return null;
 if(x instanceof Date) return isNaN(x.getTime()) ? null : x;
@@ -514,23 +513,32 @@ const r = rows[i] || [];
 const c0 = String(r[0] || '').trim(), c1 = String(r[1] || '').trim();
 if(/^total$/i.test(c0) || /^total$/i.test(c1)) continue;
 if(c0 && !bu) bu = c0;
+// Descriptions come from the Working scenario. Each scenario keeps its own account and vendor
+// (that is how the Quarter/Year feeds book it), but when Plan or the previous forecast has the
+// same account + vendor as Working on that line, it is the same item and takes Working's
+// description and contract dates (e.g. "Q1 Savings Allocation" -> "Q1-Q2 Savings Allocation").
+// A line reused for a different item (different account or vendor) keeps its own attributes.
+const pickS = (s, attr) => { const col = cols.find(x => x.scen === s && x.attr === attr); return col ? r[col.c] : ''; };
+const attrs = s => ({
+account: String(pickS(s, 'account') || '').trim(),
+vendor: String(pickS(s, 'vendor') || '').trim(),
+desc: String(pickS(s, 'desc') || '').trim(),
+start: nvFmtDate(pickS(s, 'start')),
+end: nvFmtDate(pickS(s, 'end'))
+});
+const W = attrs('w');
+const sameItem = A => W.account && nvGlCode(A.account) === nvGlCode(W.account) && nvKey(A.vendor.replace(/^no vendor.*$/i, 'nv')) === nvKey(W.vendor.replace(/^no vendor.*$/i, 'nv'));
 ['w','p','f'].forEach(s => {
-const pick = attr => { const col = cols.find(x => x.scen === s && x.attr === attr); return col ? r[col.c] : ''; };
-const account = String(pick('account') || '').trim();
-if(!account) return;
+const A = s === 'w' ? W : attrs(s);
+if(!A.account) return;
+const id = (s !== 'w' && sameItem(A)) ? { account:A.account, vendor:A.vendor, desc:W.desc || A.desc, start:W.start || A.start, end:W.end || A.end } : A;
 const amounts = {};
 cols.filter(x => x.scen === s && x.attr === 'amount').forEach(x => {
 const val = v(r[x.c]);
 if(Math.abs(val) >= 0.005) amounts[x.ord] = (amounts[x.ord] || 0) + val;
 });
-entries.push({
-s, account,
-vendor: String(pick('vendor') || '').trim(),
-desc: String(pick('desc') || '').trim(),
-start: nvFmtDate(pick('start')),
-end: nvFmtDate(pick('end')),
-amounts
-});
+if(!Object.keys(amounts).length) return;
+entries.push({ s, account:id.account, vendor:id.vendor, desc:id.desc, start:id.start, end:id.end, amounts });
 });
 }
 return { fileName: fileName || '', bu, entries };
@@ -635,15 +643,19 @@ function det(ms){ return bk === 'f' ? ms.filter(function(m){ return m >= fs; }) 
 var bd = g.board || { w:[], p:[], f:[] };
 // rows = only the line items that move Working away from the benchmark (|var| >= $1);
 // totals (detW/detB) still cover every line so the unexplained remainder is exact.
-var P = { months:proj, rows:[], detW:0, detB:0, boardW:sum(bd.w, proj), boardB:sum(bd[bk], proj) };
+var P = { months:proj, rows:[], detW:0, detB:0, boardW:sum(bd.w, proj), boardB:sum(bd[bk], proj), outB:0 };
 var C = { months:closed, detMonths:det(closed), rows:[], boardW:sum(bd.w, closed), boardB:sum(bd[bk], closed), detB:0 };
 var V = [];
 g.items.forEach(function(it){
 if(!it.nv){ var vw = sum(it.w, proj), vb = sum(it[bk], det(months)); if(Math.abs(vw) >= 0.5 || Math.abs(vb) >= 0.5) V.push({ it:it, w:vw, b:vb }); return; }
 var w = sum(it.w, proj), b = sum(it[bk], det(proj));
 P.detW += w; P.detB += b;
-if(Math.abs(w - b) >= 1) P.rows.push({ it:it, w:w, b:b, v:w - b });
-var cb = sum(it[bk], C.detMonths);
+// vs Plan: only Working line items (with their Plan beside); vs Forecast: Working and previous-forecast line items.
+var inScope = bk === 'f' ? (Math.abs(w) >= 0.5 || Math.abs(b) >= 0.5) : Math.abs(w) >= 0.5;
+if(inScope && Math.abs(w - b) >= 1) P.rows.push({ it:it, w:w, b:b, v:w - b });
+else if(!inScope) P.outB += b;   // Plan on lines that have no Working: not listed, but kept so the total still reconciles
+// Closed months: Working is actuals without line detail; only the previous forecast has lines there.
+var cb = bk === 'f' ? sum(it[bk], C.detMonths) : 0;
 if(Math.abs(cb) >= 0.5){ C.rows.push({ it:it, b:cb }); C.detB += cb; }
 });
 P.rows.sort(function(a, b){ return Math.abs(b.v) - Math.abs(a.v); });
@@ -661,18 +673,19 @@ function vc(n){ return Math.abs(n) < 500 ? 'var-neu' : n < 0 ? 'var-fav' : 'var-
 function rng(ms){ var L = NV.months || []; if(!ms.length) return ''; return ms.length === 1 ? L[ms[0]] : L[ms[0]] + '–' + L[ms[ms.length - 1]]; }
 var bl = bk === 'f' ? 'FCST' : 'Plan', body = '';
 var cv = s.closed.boardW - s.closed.boardB;
-if(s.proj.months.length && (s.proj.rows.length || Math.abs(s.proj.unV) >= 1)){
+if(s.proj.months.length && (s.proj.rows.length || Math.abs(s.proj.unV) >= 1 || Math.abs(s.proj.outB) >= 1)){
 body += '<div class="nv-mini-h">' + esc(rng(s.proj.months)) + ' · line items causing the variance</div>';
 body += '<table class="nv-mini-t"><thead><tr><th></th><th>Working</th><th>' + bl + '</th><th>Var</th></tr></thead><tbody>';
 s.proj.rows.forEach(function(r){
 var tagTxt = Math.abs(r.b) < 0.5 ? 'not in ' + bl : Math.abs(r.w) < 0.5 ? 'no Working' : '';
 body += '<tr><td>' + esc(r.it.d) + (tagTxt ? ' <span class="nv-tag">' + tagTxt + '</span>' : '') + '</td><td>' + k(r.w) + '</td><td>' + k(r.b) + '</td><td class="' + vc(r.v) + '">' + k(r.v, true) + '</td></tr>';
 });
+if(Math.abs(s.proj.outB) >= 1) body += '<tr class="nv-un"><td>' + bl + ' on lines with no Working</td><td>—</td><td>' + k(s.proj.outB) + '</td><td class="' + vc(-s.proj.outB) + '">' + k(-s.proj.outB, true) + '</td></tr>';
 if(Math.abs(s.proj.unV) >= 1) body += '<tr class="nv-un"><td>Not explained by line items</td><td>' + k(s.proj.unW) + '</td><td>' + k(s.proj.unB) + '</td><td class="' + vc(s.proj.unV) + '">' + k(s.proj.unV, true) + '</td></tr>';
 body += '</tbody></table>';
 }
 if(s.closed.months.length && Math.abs(cv) >= 1){
-body += '<div class="nv-mini-note"><b>' + esc(rng(s.closed.months)) + ' actuals:</b> ' + k(s.closed.boardW) + ' vs ' + bl + ' ' + k(s.closed.boardB) + ' (<span class="' + vc(cv) + '">' + k(cv, true) + '</span>). Actuals carry no line detail' + (s.closed.rows.length ? '; planned lines: ' + s.closed.rows.slice(0, 4).map(function(r){ return esc(r.it.d) + ' ' + k(r.b); }).join(', ') + (s.closed.rows.length > 4 ? ', …' : '') : '') + '.</div>';
+body += '<div class="nv-mini-note"><b>' + esc(rng(s.closed.months)) + ' actuals:</b> ' + k(s.closed.boardW) + ' vs ' + bl + ' ' + k(s.closed.boardB) + ' (<span class="' + vc(cv) + '">' + k(cv, true) + '</span>). Actuals carry no line detail' + (s.closed.rows.length ? '; previous forecast lines: ' + s.closed.rows.slice(0, 4).map(function(r){ return esc(r.it.d) + ' ' + k(r.b); }).join(', ') + (s.closed.rows.length > 4 ? ', …' : '') : '') + '.</div>';
 }
 if(!body) return '';
 var h = '<div class="nv-mini">';
