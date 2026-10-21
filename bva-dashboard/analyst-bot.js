@@ -218,10 +218,9 @@ function initAnalystBot(DATA){
       if(!it.nv) return;
       var w = nvSum(it.w, proj), b = nvSum(it[bk], det(proj));
       o.detW += w; o.detB += b;
-      // vs Plan: only Working line items (Plan beside); vs Forecast: Working and previous-forecast line items.
-      var inScope = bk === 'f' ? (Math.abs(w) >= 0.5 || Math.abs(b) >= 0.5) : Math.abs(w) >= 0.5;
+      var inScope = Math.abs(w) >= 0.5 || Math.abs(b) >= 0.5;   // lines only in Plan / previous forecast are listed too
       if(inScope && Math.abs(w - b) >= 1) o.rows.push({ it:it, w:w, b:b, v:w - b });   // only lines that cause variance
-      else if(!inScope) o.outB += b;   // Plan on lines with no Working: not listed, kept so the total reconciles
+      else if(!inScope) o.outB += b;   // (no longer used: every line with an amount is in scope)
       // Closed months: Working is actuals without lines; only the previous forecast has lines there.
       var cb = bk === 'f' ? nvSum(it[bk], det(closed)) : 0;
       if(Math.abs(cb) >= 0.5) o.plan.push({ it:it, b:cb });
