@@ -32,8 +32,8 @@ const FEED_DEFS = [
 { key:'year',    title:'YEAR',    sub:'Full-year OPEX feed' },
 { key:'hc',      title:'HC',      sub:'Headcount feed' },
 { key:'te',      title:'T&E',     sub:'Travel & expense feed' },
-{ key:'opex',    title:'OPEX',    sub:'OPEX Feed (optional)' },
-{ key:'nv',      title:'NO VENDOR', sub:'No Vendor line items (optional)' }
+{ key:'opex',    title:'OPEX',    sub:'OPEX Feed (optional)', hidden:true }, // Budget Utilization feed, not in use: card hidden (set hidden:false to bring it back)
+{ key:'nv',      title:'NO VENDOR', sub:'No Vendor line items · Working only (optional)' }
 ];
 // ---------- Dynamic multi-board upload groups ----------
 function emptyFiles(){ return { quarter:null, year:null, hc:null, te:null, opex:null, nv:null }; }
@@ -42,7 +42,7 @@ while(state.boards.length < count) state.boards.push(emptyFiles());
 state.boards.length = count;
 }
 function boardGroupHtml(boardIdx, single){
-const cards = FEED_DEFS.map(def => {
+const cards = FEED_DEFS.filter(def => !def.hidden).map(def => {
 const id = `b${boardIdx}-${def.key}-file`;
 const nameId = `b${boardIdx}-${def.key}-name`;
 return `<label class="upload-card" for="${id}">
@@ -91,6 +91,133 @@ if(label) label.textContent = file ? file.name : 'Choose file';
 input.closest('.upload-card').classList.toggle('loaded', !!file);
 updateBoardTag(boardIdx);
 updateBuildButton();
+if(feed === 'nv' && file) validateNvFile(boardIdx, file);
+}
+// The No Vendor feed is validated on upload: a file with any scenario other than Working is refused.
+function validateNvFile(boardIdx, file){
+return readWorkbook(file).then(wb => { parseNoVendorFeed(wb, file.name); return null; }).catch(err => {
+if(state.boards[boardIdx] && state.boards[boardIdx].nv === file) state.boards[boardIdx].nv = null;
+const input = document.getElementById(`b${boardIdx}-nv-file`);
+const label = document.getElementById(`b${boardIdx}-nv-name`);
+if(input){ input.value = ''; input.closest('.upload-card').classList.remove('loaded'); }
+if(label) label.textContent = 'File rejected · Working only';
+const msg = err && err.message ? err.message : 'No Vendor feed could not be read.';
+showError(msg);
+updateBuildButton();
+return msg;
+});
+}
+// ---------- Bulk upload: one drop for all feeds ----------
+// File names are fixed by the close process; only the business unit and the month change:
+//   BvA_QUARTER_<BU> Feed_FY27Sep.xlsx · BvA_YEAR_… · BvA_HC_… · BvA_TE_…
+//   <BU> NO VENDOR - OPEX Line ItemSep.xlsx   (a " (1)" copy suffix is fine)
+// Anything else is checked by content (HC, T&E, No Vendor); unknown files are listed, not guessed.
+const BULK_MAX_BOARDS = 5;
+function bulkClassifyName(name){
+const n = String(name || '').replace(/\.xlsx?$/i, '').replace(/\s*\(\d+\)\s*$/, '').trim();
+let m = n.match(/^BvA_(QUARTER|YEAR|HC|TE)_(.+?)\s*Feed_?(FY\d{2})?\s*([A-Za-z]{3,9})?$/i);
+if(m) return { feed:{QUARTER:'quarter', YEAR:'year', HC:'hc', TE:'te'}[m[1].toUpperCase()], bu:m[2].trim(), month:m[4] ? normalizeMonth(m[4]) : '', fy:m[3] ? m[3].toUpperCase() : '' };
+m = n.match(/^(.+?)\s+NO\s+VENDOR\b.*?(?:Item\s*([A-Za-z]{3,9}))?$/i);
+if(m) return { feed:'nv', bu:m[1].trim(), month:m[2] ? normalizeMonth(m[2]) : '', fy:'' };
+return null;
+}
+function bulkClassifyContent(file){
+return readWorkbook(file).then(wb => {
+const rows = (wb.rows || []).slice(0, 40);
+const cell = r => String((r && (r[0] || r[1])) || '').toLowerCase();
+if(rows.some(r => cell(r).includes('salary accrued'))) return 'hc';
+if(rows.some(r => String(r[0] || '').trim().toLowerCase() === 'employee' && String(r[1] || '').trim().toLowerCase() === 'vendor')) return 'te';
+if(rows.slice(0, 12).some(r => r.some(c => /^\s*account\s*$/i.test(String(c))))) return 'nv';
+return null;
+}).catch(() => null);
+}
+function bulkBuKey(bu){ return String(bu || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim(); }
+// Reads files and folders dropped on the zone (folders are walked recursively).
+function bulkFilesFromDrop(dt){
+const items = Array.from(dt.items || []).map(it => it.webkitGetAsEntry ? it.webkitGetAsEntry() : null).filter(Boolean);
+if(!items.length) return Promise.resolve(Array.from(dt.files || []));
+const out = [];
+const walk = entry => new Promise(resolve => {
+if(entry.isFile){ entry.file(f => { out.push(f); resolve(); }, () => resolve()); return; }
+if(!entry.isDirectory){ resolve(); return; }
+const reader = entry.createReader(), all = [];
+const next = () => reader.readEntries(batch => { if(!batch.length){ Promise.all(all.map(walk)).then(resolve); return; } all.push(...batch); next(); }, () => resolve());
+next();
+});
+return Promise.all(items.map(walk)).then(() => out);
+}
+async function bulkAssign(fileList){
+const files = Array.from(fileList || []).filter(f => /\.xlsx?$/i.test(f.name) && !/^~\$/.test(f.name) && !/^\./.test(f.name));
+const status = document.getElementById('bulk-status');
+if(!files.length){ if(status) status.innerHTML = '<span class="bulk-warn">No Excel files found.</span>'; return; }
+const found = [], unknown = [], notes = [];
+for(const f of files){
+let c = bulkClassifyName(f.name);
+if(!c){ const feed = await bulkClassifyContent(f); if(feed) c = { feed, bu:'', month:'', fy:'' }; }
+if(c) found.push({ file:f, ...c }); else unknown.push(f.name);
+}
+// One board per business unit, in the order they appear (Quarter files first).
+const order = [];
+found.slice().sort((a, b) => (a.feed === 'quarter' ? 0 : 1) - (b.feed === 'quarter' ? 0 : 1)).forEach(x => { const k = bulkBuKey(x.bu); if(x.bu && order.indexOf(k) < 0) order.push(k); });
+if(!order.length) order.push('');
+if(order.length > BULK_MAX_BOARDS){ notes.push(`${order.length} business units found; only the first ${BULK_MAX_BOARDS} were loaded (max ${BULK_MAX_BOARDS} boards).`); order.length = BULK_MAX_BOARDS; }
+const groups = order.map(k => ({ key:k, files:{} }));
+found.forEach(x => {
+let gi = order.indexOf(bulkBuKey(x.bu));
+if(gi < 0){
+if(!x.bu && groups.length === 1) gi = 0;
+else { unknown.push(x.file.name + (x.bu ? '' : ' (business unit not in the name)')); return; }
+}
+const g = groups[gi];
+if(g.files[x.feed]) notes.push(`Two ${FEED_DEFS.find(d => d.key === x.feed).title} files for ${x.bu || 'this board'}: kept ${x.file.name}.`);
+g.files[x.feed] = x;
+});
+// Month and fiscal year must match the Quarter feed of the same board.
+groups.forEach(g => {
+const q = g.files.quarter;
+if(!q){ notes.push(`${g.key || 'Board'}: no QUARTER file.`); }
+if(!g.files.year) notes.push(`${g.key || 'Board'}: no YEAR file.`);
+if(!q) return;
+Object.values(g.files).forEach(x => {
+if(x === q) return;
+if(x.month && q.month && x.month !== q.month) notes.push(`${x.file.name} is ${x.month}, but the Quarter feed is ${q.month}.`);
+if(x.fy && q.fy && x.fy !== q.fy) notes.push(`${x.file.name} is ${x.fy}, but the Quarter feed is ${q.fy}.`);
+});
+});
+if(groups.length !== state.boardCount) setBoardCount(groups.length);
+groups.forEach((g, i) => {
+const files = emptyFiles();
+Object.keys(g.files).forEach(k => { files[k] = g.files[k].file; });
+state.boards[i] = files;
+});
+showError('');
+renderBoardGroups();
+const nvMsgs = await Promise.all(groups.map((g, i) => g.files.nv ? validateNvFile(i, g.files.nv.file) : null));
+nvMsgs.forEach((m, i) => { if(m) notes.push(groups[i].files.nv.file.name + ': ' + m); });
+const loaded = found.length - unknown.filter(u => / \(business unit/.test(u)).length - nvMsgs.filter(Boolean).length;
+let h = `<span class="bulk-ok"><i class="ti ti-check"></i> ${loaded} file${loaded === 1 ? '' : 's'} placed in ${groups.length} board${groups.length === 1 ? '' : 's'}${groups.some(g => g.key) ? ' (' + groups.map(g => g.key).filter(Boolean).join(', ') + ')' : ''}.</span>`;
+if(unknown.length) h += `<span class="bulk-warn">Not recognized, place by hand: ${unknown.map(escapeHtmlBulk).join(', ')}.</span>`;
+notes.forEach(n => { h += `<span class="bulk-warn">${escapeHtmlBulk(n)}</span>`; });
+if(status) status.innerHTML = h;
+}
+function escapeHtmlBulk(x){ return String(x == null ? '' : x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function setupBulkZone(){
+if(!dom.boardGroups || document.getElementById('bulk-zone')) return;
+const zone = document.createElement('div');
+zone.id = 'bulk-zone';
+zone.className = 'bulk-zone';
+zone.innerHTML = `<div class="bulk-main"><i class="ti ti-files"></i><div><b>Drop all feeds here</b><span>Files or whole BU folders · each file goes to its box, one board per business unit</span></div></div>
+<div class="bulk-btns"><label class="ghost-btn bulk-btn"><i class="ti ti-file-plus"></i> Choose files<input type="file" id="bulk-files" accept=".xlsx,.xls" multiple hidden></label>
+<label class="ghost-btn bulk-btn"><i class="ti ti-folder"></i> Choose folder<input type="file" id="bulk-folder" webkitdirectory multiple hidden></label></div>
+<div class="bulk-status" id="bulk-status"></div>`;
+dom.boardGroups.parentNode.insertBefore(zone, dom.boardGroups);
+['bulk-files', 'bulk-folder'].forEach(id => {
+const inp = document.getElementById(id);
+inp.addEventListener('change', () => { const fl = Array.from(inp.files || []); inp.value = ''; bulkAssign(fl); });
+});
+['dragenter', 'dragover'].forEach(ev => zone.addEventListener(ev, e => { e.preventDefault(); zone.classList.add('drag'); }));
+['dragleave', 'drop'].forEach(ev => zone.addEventListener(ev, e => { e.preventDefault(); if(ev === 'dragleave' && zone.contains(e.relatedTarget)) return; zone.classList.remove('drag'); }));
+zone.addEventListener('drop', e => { bulkFilesFromDrop(e.dataTransfer).then(bulkAssign); });
 }
 function updateBoardTag(boardIdx){
 const tag = document.getElementById(`bg-tag-${boardIdx}`);
@@ -121,6 +248,7 @@ btn.addEventListener('click', () => setBoardCount(Number(btn.dataset.count)));
 });
 }
 renderBoardGroups();
+setupBulkZone();
 document.getElementById('save-nav').addEventListener('click', saveState);
 document.getElementById('download-nav').addEventListener('click', downloadHtml);
 const pdfNav = document.getElementById('download-pdf-nav');
@@ -441,9 +569,9 @@ return { meta: meta || {}, rows: wb.rows, workbook: wb.workbook, sheet: wb.sheet
 // Layout (Pigment "OPEX Line Item" export):
 //   header row A : attribute labels (Account, Vendor, Description, Contract Start Date, Contract End Date, Amount)
 //   header row B : month labels under Amount ("Feb 26", "Mar 26", ...)
-//   header row C : scenario per column (Working, FY27 Plan, 6+6 Forecast)
-// Every attribute repeats once per scenario; the same line number can hold a different item in
-// each scenario. Lines are merged by GL + vendor + description (descriptions from Working, see below).
+//   header row C : scenario per column — must be Working only
+// The feed is accepted only when every column is the Working scenario: Plan and previous forecast
+// come from the Quarter/Year feeds, the line items only name what makes up the No Vendor amount.
 function nvCellDate(x){
 if(x === null || x === undefined || x === '') return null;
 if(x instanceof Date) return isNaN(x.getTime()) ? null : x;
@@ -475,8 +603,12 @@ function parseNoVendorFeed(wb, fileName){
 const rows = wb.rows || [];
 const head = rows.slice(0, 12);
 const attrRowIdx = head.findIndex(r => r.some(c => /^\s*account\s*$/i.test(String(c))));
-const scenRowIdx = head.findIndex(r => r.filter(c => /working|plan|forecast|fcst/i.test(String(c))).length >= 3);
-if(attrRowIdx < 0 || scenRowIdx < 0) throw new Error('No Vendor feed: could not find the Account / scenario header rows. Expected the Pigment "OPEX Line Item" layout.');
+const scenRowIdx = head.findIndex(r => r.filter(c => /working|plan|forecast|fcst|budget|actual|scenario/i.test(String(c))).length >= 3);
+if(attrRowIdx < 0) throw new Error('No Vendor feed: could not find the Account header row. Expected the Pigment "OPEX Line Item" layout.');
+if(scenRowIdx < 0) throw new Error('No Vendor feed: could not find the scenario header row. Export the Pigment "OPEX Line Item" view with the Working scenario only.');
+const otherScen = [];
+(rows[scenRowIdx] || []).forEach(c => { const t = String(c || '').trim(); if(t && !/working/i.test(t) && otherScen.indexOf(t) < 0) otherScen.push(t); });
+if(otherScen.length) throw new Error(`No Vendor feed rejected: only the Working scenario is accepted, but the file also has ${otherScen.join(', ')}. Export it again with Working only.`);
 let monthRowIdx = -1;
 for(let r = attrRowIdx; r < scenRowIdx; r++){
 if((rows[r] || []).filter(c => nvCellDate(c) && /[A-Za-z]{3}|^\d{5}$/.test(String(c))).length >= 3){ monthRowIdx = r; break; }
@@ -492,7 +624,7 @@ if(a) curAttr = a.toLowerCase();
 const mcell = monthRow[c];
 if(mcell !== '' && mcell !== undefined && mcell !== null){ const dt = nvCellDate(mcell); curMonth = dt ? nvFiscalOrd(dt) : null; }
 const sc = String(scenRow[c] || '');
-const scen = /working/i.test(sc) ? 'w' : /forecast|fcst/i.test(sc) ? 'f' : /plan|budget/i.test(sc) ? 'p' : null;
+const scen = /working/i.test(sc) ? 'w' : null;
 if(!scen || !curAttr) continue;
 let attr = null;
 if(/^account/.test(curAttr)) attr = 'account';
@@ -513,33 +645,16 @@ const r = rows[i] || [];
 const c0 = String(r[0] || '').trim(), c1 = String(r[1] || '').trim();
 if(/^total$/i.test(c0) || /^total$/i.test(c1)) continue;
 if(c0 && !bu) bu = c0;
-// Descriptions come from the Working scenario. Each scenario keeps its own account and vendor
-// (that is how the Quarter/Year feeds book it), but when Plan or the previous forecast has the
-// same account + vendor as Working on that line, it is the same item and takes Working's
-// description and contract dates (e.g. "Q1 Savings Allocation" -> "Q1-Q2 Savings Allocation").
-// A line reused for a different item (different account or vendor) keeps its own attributes.
-const pickS = (s, attr) => { const col = cols.find(x => x.scen === s && x.attr === attr); return col ? r[col.c] : ''; };
-const attrs = s => ({
-account: String(pickS(s, 'account') || '').trim(),
-vendor: String(pickS(s, 'vendor') || '').trim(),
-desc: String(pickS(s, 'desc') || '').trim(),
-start: nvFmtDate(pickS(s, 'start')),
-end: nvFmtDate(pickS(s, 'end'))
-});
-const W = attrs('w');
-const sameItem = A => W.account && nvGlCode(A.account) === nvGlCode(W.account) && nvKey(A.vendor.replace(/^no vendor.*$/i, 'nv')) === nvKey(W.vendor.replace(/^no vendor.*$/i, 'nv'));
-['w','p','f'].forEach(s => {
-const A = s === 'w' ? W : attrs(s);
-if(!A.account) return;
-const id = (s !== 'w' && sameItem(A)) ? { account:A.account, vendor:A.vendor, desc:W.desc || A.desc, start:W.start || A.start, end:W.end || A.end } : A;
+const pick = attr => { const col = cols.find(x => x.attr === attr); return col ? r[col.c] : ''; };
+const account = String(pick('account') || '').trim();
+if(!account) continue;
 const amounts = {};
-cols.filter(x => x.scen === s && x.attr === 'amount').forEach(x => {
+cols.filter(x => x.attr === 'amount').forEach(x => {
 const val = v(r[x.c]);
 if(Math.abs(val) >= 0.005) amounts[x.ord] = (amounts[x.ord] || 0) + val;
 });
-if(!Object.keys(amounts).length) return;
-entries.push({ s, account:id.account, vendor:id.vendor, desc:id.desc, start:id.start, end:id.end, amounts });
-});
+if(!Object.keys(amounts).length) continue;
+entries.push({ s:'w', account, vendor:String(pick('vendor') || '').trim(), desc:String(pick('desc') || '').trim(), start:nvFmtDate(pick('start')), end:nvFmtDate(pick('end')), amounts });
 }
 return { fileName: fileName || '', bu, entries };
 }
@@ -549,25 +664,19 @@ function nvKey(s){ return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '
 // validations, and the No Vendor rows of the Year feed (per GL) for reconciliation.
 function buildNoVendorModel(nvParsed, meta, yearRows, monthLabels){
 const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
-const warnings = [], notes = [];
+const warnings = [];
 const fyNum = parseInt(String(meta.fyToken || '').replace(/\D/g, ''), 10);
 const rm = fiscalOrder.indexOf(meta.monthToken);
 if(!Number.isFinite(fyNum)) warnings.push('Could not read the fiscal year from the Quarter filename, so the No Vendor feed months cannot be aligned to the board.');
 const base = fyNum * 12;
-const firstOrd = s => { let o = null; nvParsed.entries.forEach(e => { if(e.s !== s) return; Object.keys(e.amounts).forEach(k => { const n = Number(k); if(o === null || n < o) o = n; }); }); return o; };
-const wOrd = firstOrd('w'), fOrd = firstOrd('f');
-const toIdx = o => o === null ? null : o - base;
+let wOrd = null;
+nvParsed.entries.forEach(e => Object.keys(e.amounts).forEach(k => { const n = Number(k); if(wOrd === null || n < wOrd) wOrd = n; }));
 const label = i => (i === null || i === undefined) ? '—' : (i >= 0 && i < 12 ? (monthLabels[i] || fiscalOrder[i]) : (i >= 12 ? fiscalOrder[i - 12] + ' (next FY)' : fiscalOrder[(i % 12 + 12) % 12] + ' (prior FY)'));
-const wStart = toIdx(wOrd), fStart = toIdx(fOrd);
+const wStart = wOrd === null ? null : wOrd - base;
 if(rm >= 0 && wStart !== null && wStart !== rm + 1){
 warnings.push(`Working line items start in ${label(wStart)}, but this board is ${meta.monthToken} ${meta.fyToken} (expected ${label(rm + 1)}). The No Vendor feed may be from a different close.`);
 }
-if(wStart === null) notes.push('The No Vendor feed has no Working amounts, so only Plan and Forecast lines can be shown.');
-if(wStart !== null && fStart !== null && wStart - fStart > 1){
-notes.push(`Previous forecast not refreshed yet: it projects from ${label(fStart)}, Working from ${label(wStart)}. ${label(fStart)}–${label(wStart - 1)} have Forecast line items but Working is actuals with no line detail.`);
-} else if(wStart !== null && fStart !== null && fStart > wStart){
-notes.push(`Forecast line items start in ${label(fStart)}, after Working (${label(wStart)}).`);
-}
+if(wStart === null) warnings.push('The No Vendor feed has no Working amounts.');
 const code = String(meta.dashboardCode || '');
 const buNorm = nvKey(String(nvParsed.bu).replace(/^\d+\s*-\s*/, ''));
 const codeNorm = nvKey(code.replace(/^\d+\s*-\s*/, ''));
@@ -595,7 +704,7 @@ pendingV = []; if(c) pendingG.push(c); return;
 if(r.rowType === 'l2'){ pendingG.forEach(c => { glInfo[c].cat = cleanLabel(r.label); }); pendingG = []; pendingV = []; }
 });
 
-// Line items: keep board-FY months, merge scenarios by GL + vendor + description.
+// Line items (Working only): keep board-FY months, merge by GL + vendor + description.
 const items = {}, itemOrder = [];
 nvParsed.entries.forEach(e => {
 const arr = new Array(12).fill(0);
@@ -607,9 +716,9 @@ const isNV = !e.vendor || /^no vendor/i.test(e.vendor);
 const vend = isNV ? 'No Vendor' : e.vendor.replace(/^\d+\s*-\s*/, '').trim();
 const key = gl + '|' + (isNV ? 'nv' : nvKey(e.vendor)) + '|' + nvKey(e.desc);
 let it = items[key];
-if(!it){ it = items[key] = { key, gl, account:e.account, vendor:vend, nv:isNV, d:e.desc || '(no description)', w:new Array(12).fill(0), p:new Array(12).fill(0), f:new Array(12).fill(0), dt:{} }; itemOrder.push(key); }
-arr.forEach((x, k) => { it[e.s][k] += x; });
-if(e.start || e.end) it.dt[e.s] = (e.start || '?') + ' – ' + (e.end || '?');
+if(!it){ it = items[key] = { key, gl, account:e.account, vendor:vend, nv:isNV, d:e.desc || '(no description)', w:new Array(12).fill(0), dt:'' }; itemOrder.push(key); }
+arr.forEach((x, k) => { it.w[k] += x; });
+if((e.start || e.end) && !it.dt) it.dt = (e.start || '?') + ' – ' + (e.end || '?');
 if(gl && !glInfo[gl]){ glInfo[gl] = { code:gl, label:e.account, cat:'', board:null, notInYear:true }; order.push(gl); }
 });
 const missing = order.filter(c => glInfo[c].notInYear);
@@ -617,15 +726,14 @@ if(missing.length) warnings.push(`GL account${missing.length > 1 ? 's' : ''} ${m
 const gls = order.map(c => {
 const g = glInfo[c];
 const its = itemOrder.map(k => items[k]).filter(it => it.gl === c).map(it => ({
-d:it.d, v:it.vendor, nv:it.nv, w:it.w.map(r2), p:it.p.map(r2), f:it.f.map(r2),
-dt: it.dt.w || it.dt.f || it.dt.p || ''
+d:it.d, v:it.vendor, nv:it.nv, w:it.w.map(r2), dt:it.dt
 }));
 return { code:c, label:g.label, cat:g.cat, board: g.board ? { w:g.board.w.map(r2), p:g.board.p.map(r2), f:g.board.f.map(r2) } : null, items:its };
 }).filter(g => g.items.length || (g.board && g.board.w.concat(g.board.p, g.board.f).some(x => Math.abs(x) >= 0.5)));
 return {
-file: nvParsed.fileName, bu: nvParsed.bu, rm, wStart, fStart,
+file: nvParsed.fileName, bu: nvParsed.bu, rm, wStart,
 months: (monthLabels && monthLabels.length === 12) ? monthLabels.slice() : fiscalOrder.slice(),
-warnings, notes, gls
+warnings, gls
 };
 }
 // Pure helpers shared by the board, the drill-down and the exported HTML.
@@ -637,32 +745,23 @@ for(i = 0; i < NV.gls.length; i++){ if(NV.gls[i].code === code){ g = NV.gls[i]; 
 // Accounts without No Vendor line items in the feed (e.g. payroll) get no detail at all.
 if(!g || !g.items.some(function(it){ return it.nv; })) return null;
 function sum(a, ms){ var s = 0; ms.forEach(function(m){ s += (a && a[m]) || 0; }); return s; }
-var rm = NV.rm, fs = (NV.fStart === null || NV.fStart === undefined) ? 99 : NV.fStart;
+var rm = NV.rm;
 var proj = months.filter(function(m){ return m > rm; }), closed = months.filter(function(m){ return m <= rm; });
-function det(ms){ return bk === 'f' ? ms.filter(function(m){ return m >= fs; }) : ms; }
 var bd = g.board || { w:[], p:[], f:[] };
-// rows = only the line items that move Working away from the benchmark (|var| >= $1);
-// totals (detW/detB) still cover every line so the unexplained remainder is exact.
-var P = { months:proj, rows:[], detW:0, detB:0, boardW:sum(bd.w, proj), boardB:sum(bd[bk], proj), outB:0 };
-var C = { months:closed, detMonths:det(closed), rows:[], boardW:sum(bd.w, closed), boardB:sum(bd[bk], closed), detB:0 };
-var V = [];
+// The feed is Working only: the line items name what makes up the Working No Vendor amount;
+// the benchmark (Plan or previous forecast) is the No Vendor total of the Quarter/Year feeds.
+var P = { months:proj, rows:[], detW:0, boardW:sum(bd.w, proj), boardB:sum(bd[bk], proj) };
+var C = { months:closed, boardW:sum(bd.w, closed), boardB:sum(bd[bk], closed) };
 g.items.forEach(function(it){
-if(!it.nv){ var vw = sum(it.w, proj), vb = sum(it[bk], det(months)); if(Math.abs(vw) >= 0.5 || Math.abs(vb) >= 0.5) V.push({ it:it, w:vw, b:vb }); return; }
-var w = sum(it.w, proj), b = sum(it[bk], det(proj));
-P.detW += w; P.detB += b;
-// vs Plan: only Working line items (with their Plan beside); vs Forecast: Working and previous-forecast line items.
-var inScope = bk === 'f' ? (Math.abs(w) >= 0.5 || Math.abs(b) >= 0.5) : Math.abs(w) >= 0.5;
-if(inScope && Math.abs(w - b) >= 1) P.rows.push({ it:it, w:w, b:b, v:w - b });
-else if(!inScope) P.outB += b;   // Plan on lines that have no Working: not listed, but kept so the total still reconciles
-// Closed months: Working is actuals without line detail; only the previous forecast has lines there.
-var cb = bk === 'f' ? sum(it[bk], C.detMonths) : 0;
-if(Math.abs(cb) >= 0.5){ C.rows.push({ it:it, b:cb }); C.detB += cb; }
+if(!it.nv) return;
+var w = sum(it.w, proj);
+P.detW += w;
+if(Math.abs(w) >= 0.5) P.rows.push({ it:it, w:w });
 });
-P.rows.sort(function(a, b){ return Math.abs(b.v) - Math.abs(a.v); });
-C.rows.sort(function(a, b){ return Math.abs(b.b) - Math.abs(a.b); });
-P.unW = P.boardW - P.detW; P.unB = P.boardB - P.detB; P.unV = P.unW - P.unB;
-C.unB = sum(bd[bk], C.detMonths) - C.detB;
-return { gl:g, proj:P, closed:C, vend:V };
+P.rows.sort(function(a, b){ return Math.abs(b.w) - Math.abs(a.w); });
+P.varB = P.boardW - P.boardB;      // No Vendor variance on the board
+P.unW = P.boardW - P.detW;         // Working No Vendor not named by any line item
+return { gl:g, proj:P, closed:C };
 }
 function nvMiniHtml(NV, code, months, bk){
 var s = nvSlice(NV, code, months, bk);
@@ -671,26 +770,24 @@ function esc(x){ return String(x == null ? '' : x).replace(/&/g,'&amp;').replace
 function k(n, signed){ if(!isFinite(n) || Math.abs(n) < (signed ? 1 : 0.5)) return '—'; var a = Math.abs(n), t = a >= 1000 ? '$' + (a / 1000).toFixed(a >= 100000 ? 0 : 1) + 'K' : '$' + Math.round(a); if(signed) return (n > 0 ? '+' : '-') + t; return n < 0 ? '(' + t + ')' : t; }
 function vc(n){ return Math.abs(n) < 500 ? 'var-neu' : n < 0 ? 'var-fav' : 'var-unfav'; }
 function rng(ms){ var L = NV.months || []; if(!ms.length) return ''; return ms.length === 1 ? L[ms[0]] : L[ms[0]] + '–' + L[ms[ms.length - 1]]; }
-var bl = bk === 'f' ? 'FCST' : 'Plan', body = '';
+var bl = bk === 'f' ? 'FCST' : 'Plan', body = '', P = s.proj;
 var cv = s.closed.boardW - s.closed.boardB;
-if(s.proj.months.length && (s.proj.rows.length || Math.abs(s.proj.unV) >= 1 || Math.abs(s.proj.outB) >= 1)){
-body += '<div class="nv-mini-h">' + esc(rng(s.proj.months)) + ' · line items causing the variance</div>';
-body += '<table class="nv-mini-t"><thead><tr><th></th><th>Working</th><th>' + bl + '</th><th>Var</th></tr></thead><tbody>';
-s.proj.rows.forEach(function(r){
-var tagTxt = Math.abs(r.b) < 0.5 ? 'not in ' + bl : Math.abs(r.w) < 0.5 ? 'no Working' : '';
-body += '<tr><td>' + esc(r.it.d) + (tagTxt ? ' <span class="nv-tag">' + tagTxt + '</span>' : '') + '</td><td>' + k(r.w) + '</td><td>' + k(r.b) + '</td><td class="' + vc(r.v) + '">' + k(r.v, true) + '</td></tr>';
-});
-if(Math.abs(s.proj.outB) >= 1) body += '<tr class="nv-un"><td>' + bl + ' on lines with no Working</td><td>—</td><td>' + k(s.proj.outB) + '</td><td class="' + vc(-s.proj.outB) + '">' + k(-s.proj.outB, true) + '</td></tr>';
-if(Math.abs(s.proj.unV) >= 1) body += '<tr class="nv-un"><td>Not explained by line items</td><td>' + k(s.proj.unW) + '</td><td>' + k(s.proj.unB) + '</td><td class="' + vc(s.proj.unV) + '">' + k(s.proj.unV, true) + '</td></tr>';
+// Only when the No Vendor row varies vs the benchmark in these months.
+if(P.months.length && Math.abs(P.varB) >= 1){
+body += '<div class="nv-mini-h">' + esc(rng(P.months)) + ' · No Vendor ' + k(P.boardW) + ' Working vs ' + k(P.boardB) + ' ' + bl + ' (<span class="' + vc(P.varB) + '">' + k(P.varB, true) + '</span>)</div>';
+if(P.rows.length || Math.abs(P.unW) >= 1){
+body += '<table class="nv-mini-t"><thead><tr><th>Working line items</th><th>Working</th></tr></thead><tbody>';
+P.rows.forEach(function(r){ body += '<tr><td>' + esc(r.it.d) + '</td><td>' + k(r.w) + '</td></tr>'; });
+if(Math.abs(P.unW) >= 1) body += '<tr class="nv-un"><td>Not explained by line items</td><td>' + k(P.unW) + '</td></tr>';
 body += '</tbody></table>';
 }
+}
 if(s.closed.months.length && Math.abs(cv) >= 1){
-body += '<div class="nv-mini-note"><b>' + esc(rng(s.closed.months)) + ' actuals:</b> ' + k(s.closed.boardW) + ' vs ' + bl + ' ' + k(s.closed.boardB) + ' (<span class="' + vc(cv) + '">' + k(cv, true) + '</span>). Actuals carry no line detail' + (s.closed.rows.length ? '; previous forecast lines: ' + s.closed.rows.slice(0, 4).map(function(r){ return esc(r.it.d) + ' ' + k(r.b); }).join(', ') + (s.closed.rows.length > 4 ? ', …' : '') : '') + '.</div>';
+body += '<div class="nv-mini-note"><b>' + esc(rng(s.closed.months)) + ' actuals:</b> ' + k(s.closed.boardW) + ' vs ' + bl + ' ' + k(s.closed.boardB) + ' (<span class="' + vc(cv) + '">' + k(cv, true) + '</span>). Actuals carry no line detail.</div>';
 }
 if(!body) return '';
 var h = '<div class="nv-mini">';
 (NV.warnings || []).forEach(function(w){ h += '<div class="nv-mini-warn">' + esc(w) + '</div>'; });
-if(bk === 'f') (NV.notes || []).forEach(function(n){ h += '<div class="nv-mini-note">' + esc(n) + '</div>'; });
 h += body;
 return h + '</div>';
 }
