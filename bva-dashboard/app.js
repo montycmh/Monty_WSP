@@ -156,12 +156,11 @@ let c = bulkClassifyName(f.name);
 if(!c){ const feed = await bulkClassifyContent(f); if(feed) c = { feed, bu:'', month:'', fy:'' }; }
 if(c) found.push({ file:f, ...c }); else unknown.push(f.name);
 }
-// One board per business unit, in the order they appear (Quarter files first).
+// Group the dropped files by business unit (Quarter files first, so their order sets the board order).
 const order = [];
 found.slice().sort((a, b) => (a.feed === 'quarter' ? 0 : 1) - (b.feed === 'quarter' ? 0 : 1)).forEach(x => { const k = bulkBuKey(x.bu); if(x.bu && order.indexOf(k) < 0) order.push(k); });
 if(!order.length) order.push('');
-if(order.length > BULK_MAX_BOARDS){ notes.push(`${order.length} business units found; only the first ${BULK_MAX_BOARDS} were loaded (max ${BULK_MAX_BOARDS} boards).`); order.length = BULK_MAX_BOARDS; }
-const groups = order.map(k => ({ key:k, files:{} }));
+const groups = order.map(k => ({ key:k, files:{}, board:-1 }));
 found.forEach(x => {
 let gi = order.indexOf(bulkBuKey(x.bu));
 if(gi < 0){
@@ -172,30 +171,59 @@ const g = groups[gi];
 if(g.files[x.feed]) notes.push(`Two ${FEED_DEFS.find(d => d.key === x.feed).title} files for ${x.bu || 'this board'}: kept ${x.file.name}.`);
 g.files[x.feed] = x;
 });
-// Month and fiscal year must match the Quarter feed of the same board.
+// Merge into the boards already on screen: never remove boards or files that were loaded before.
+// Same business unit -> same board; a new business unit -> the first empty board, or a new one (max 5).
+ensureBoards(state.boardCount);
+const boardBu = state.boards.map(f => {
+for(const k of Object.keys(f || {})){ const c = f[k] ? bulkClassifyName(f[k].name) : null; if(c && c.bu) return bulkBuKey(c.bu); }
+return '';
+});
+const isEmpty = i => !Object.values(state.boards[i] || {}).some(Boolean);
+const taken = {};
 groups.forEach(g => {
-const q = g.files.quarter;
-if(!q){ notes.push(`${g.key || 'Board'}: no QUARTER file.`); }
-if(!g.files.year) notes.push(`${g.key || 'Board'}: no YEAR file.`);
+let bi = g.key ? boardBu.indexOf(g.key) : -1;
+if(bi < 0){
+for(let i = 0; i < state.boards.length; i++){ if(!taken[i] && isEmpty(i)){ bi = i; break; } }
+}
+if(bi < 0 && !g.key){
+// No business unit in the names (files recognized by content): first board still missing those feeds.
+for(let i = 0; i < state.boards.length; i++){ if(!taken[i] && Object.keys(g.files).every(k => !state.boards[i][k])){ bi = i; break; } }
+}
+if(bi < 0 && state.boards.length < BULK_MAX_BOARDS){ state.boards.push(emptyFiles()); bi = state.boards.length - 1; }
+if(bi < 0){ notes.push(`${g.key || 'Files'}: all ${BULK_MAX_BOARDS} boards are in use, not loaded.`); Object.values(g.files).forEach(x => unknown.push(x.file.name + ' (no free board)')); g.files = {}; return; }
+taken[bi] = 1; g.board = bi; boardBu[bi] = g.key || boardBu[bi];
+Object.keys(g.files).forEach(k => {
+if(state.boards[bi][k] && state.boards[bi][k].name !== g.files[k].file.name) notes.push(`Board ${bi + 1}: replaced ${state.boards[bi][k].name} with ${g.files[k].file.name}.`);
+state.boards[bi][k] = g.files[k].file;
+});
+});
+const placedGroups = groups.filter(g => g.board >= 0);
+if(state.boards.length > state.boardCount){
+const keep = state.boards.slice();
+setBoardCount(keep.length);
+state.boards = keep;
+}
+// Month and fiscal year must match the Quarter feed of the same board (checked on the merged board).
+placedGroups.forEach(g => {
+const f = state.boards[g.board], name = g.key || `Board ${g.board + 1}`;
+if(!f.quarter) notes.push(`${name}: no QUARTER file yet.`);
+if(!f.year) notes.push(`${name}: no YEAR file yet.`);
+const q = f.quarter ? bulkClassifyName(f.quarter.name) : null;
 if(!q) return;
-Object.values(g.files).forEach(x => {
-if(x === q) return;
-if(x.month && q.month && x.month !== q.month) notes.push(`${x.file.name} is ${x.month}, but the Quarter feed is ${q.month}.`);
-if(x.fy && q.fy && x.fy !== q.fy) notes.push(`${x.file.name} is ${x.fy}, but the Quarter feed is ${q.fy}.`);
+Object.keys(f).forEach(k => {
+if(!f[k] || k === 'quarter') return;
+const x = bulkClassifyName(f[k].name);
+if(!x) return;
+if(x.month && q.month && x.month !== q.month) notes.push(`${f[k].name} is ${x.month}, but the Quarter feed is ${q.month}.`);
+if(x.fy && q.fy && x.fy !== q.fy) notes.push(`${f[k].name} is ${x.fy}, but the Quarter feed is ${q.fy}.`);
 });
-});
-if(groups.length !== state.boardCount) setBoardCount(groups.length);
-groups.forEach((g, i) => {
-const files = emptyFiles();
-Object.keys(g.files).forEach(k => { files[k] = g.files[k].file; });
-state.boards[i] = files;
 });
 showError('');
 renderBoardGroups();
-const nvMsgs = await Promise.all(groups.map((g, i) => g.files.nv ? validateNvFile(i, g.files.nv.file) : null));
-nvMsgs.forEach((m, i) => { if(m) notes.push(groups[i].files.nv.file.name + ': ' + m); });
-const loaded = found.length - unknown.filter(u => / \(business unit/.test(u)).length - nvMsgs.filter(Boolean).length;
-let h = `<span class="bulk-ok"><i class="ti ti-check"></i> ${loaded} file${loaded === 1 ? '' : 's'} placed in ${groups.length} board${groups.length === 1 ? '' : 's'}${groups.some(g => g.key) ? ' (' + groups.map(g => g.key).filter(Boolean).join(', ') + ')' : ''}.</span>`;
+const nvMsgs = await Promise.all(placedGroups.map(g => g.files.nv ? validateNvFile(g.board, g.files.nv.file) : null));
+nvMsgs.forEach((m, i) => { if(m) notes.push(placedGroups[i].files.nv.file.name + ': ' + m); });
+const loaded = placedGroups.reduce((n, g) => n + Object.keys(g.files).length, 0) - nvMsgs.filter(Boolean).length;
+let h = `<span class="bulk-ok"><i class="ti ti-check"></i> ${loaded} file${loaded === 1 ? '' : 's'} placed: ${placedGroups.map(g => (g.key || 'files') + ' → Board ' + (g.board + 1)).join(', ')}.</span>`;
 if(unknown.length) h += `<span class="bulk-warn">Not recognized, place by hand: ${unknown.map(escapeHtmlBulk).join(', ')}.</span>`;
 notes.forEach(n => { h += `<span class="bulk-warn">${escapeHtmlBulk(n)}</span>`; });
 if(status) status.innerHTML = h;
