@@ -691,7 +691,7 @@ function nvGlCode(label){ const m = String(label || '').match(/^\s*(\d{5,})/); r
 function nvKey(s){ return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
 // Joins the line items with the board: board FY months, coverage per scenario,
 // validations, and the No Vendor rows of the Year feed (per GL) for reconciliation.
-function buildNoVendorModel(nvParsed, meta, yearRows, monthLabels){
+function buildNoVendorModel(nvParsed, meta, yearRows, monthLabels, quarterRows, quarterMonths){
 const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
 const warnings = [], notes = [];
 const fyNum = parseInt(String(meta.fyToken || '').replace(/\D/g, ''), 10);
@@ -738,6 +738,22 @@ pendingV = []; if(c) pendingG.push(c); return;
 }
 if(r.rowType === 'l2'){ pendingG.forEach(c => { glInfo[c].cat = cleanLabel(r.label); }); pendingG = []; pendingV = []; }
 });
+// Quarter tables read the Quarter feed, which can carry a different forecast version than the Year
+// feed (e.g. 7+5 vs 8+4), so the quarter drill-down reconciles against the Quarter feed's No Vendor rows.
+let qPending = [];
+(quarterRows || []).forEach(r => {
+if(r.rowType === 'vendor' || r.rowType === 'novendor'){ qPending.push(r); return; }
+if(r.rowType === 'gl'){
+const c = nvGlCode(r.label), g = glInfo[c];
+qPending.forEach(x => {
+if(x.rowType !== 'novendor' || !g || !quarterMonths) return;
+if(!g.boardQ) g.boardQ = { w:new Array(12).fill(0), p:new Array(12).fill(0), f:new Array(12).fill(0) };
+(x.months || []).forEach((m, k) => { const i = quarterMonths[k]; if(i === undefined) return; g.boardQ.w[i] += m.w; g.boardQ.p[i] += m.p; g.boardQ.f[i] += m.f; });
+});
+qPending = []; return;
+}
+if(r.rowType === 'l2') qPending = [];
+});
 
 // Line items: keep board-FY months, merge scenarios by GL + vendor + description.
 const items = {}, itemOrder = [];
@@ -765,7 +781,7 @@ const its = itemOrder.map(k => items[k]).filter(it => it.gl === c).map(it => ({
 d:it.d, v:it.vendor, nv:it.nv, w:it.w.map(r2), p:it.p.map(r2), f:it.f.map(r2),
 dt: it.dt.w || it.dt.f || it.dt.p || ''
 }));
-return { code:c, label:g.label, cat:g.cat, board: g.board ? { w:g.board.w.map(r2), p:g.board.p.map(r2), f:g.board.f.map(r2) } : null, items:its };
+return { code:c, label:g.label, cat:g.cat, board: g.board ? { w:g.board.w.map(r2), p:g.board.p.map(r2), f:g.board.f.map(r2) } : null, boardQ: g.boardQ ? { w:g.boardQ.w.map(r2), p:g.boardQ.p.map(r2), f:g.boardQ.f.map(r2) } : null, items:its };
 }).filter(g => g.items.length || (g.board && g.board.w.concat(g.board.p, g.board.f).some(x => Math.abs(x) >= 0.5)));
 return {
 file: nvParsed.fileName, bu: nvParsed.bu, rm, wStart, fStart,
@@ -775,7 +791,7 @@ warnings, notes, gls
 }
 // Pure helpers shared by the board, the drill-down and the exported HTML.
 // They are serialized with toString(), so they must not reference anything outside their body.
-function nvSlice(NV, code, months, bk){
+function nvSlice(NV, code, months, bk, scope){
 var g = null, i;
 if(!NV || !NV.gls) return null;
 for(i = 0; i < NV.gls.length; i++){ if(NV.gls[i].code === code){ g = NV.gls[i]; break; } }
@@ -785,7 +801,7 @@ function sum(a, ms){ var s = 0; ms.forEach(function(m){ s += (a && a[m]) || 0; }
 var rm = NV.rm, fs = (NV.fStart === null || NV.fStart === undefined) ? 99 : NV.fStart;
 var proj = months.filter(function(m){ return m > rm; }), closed = months.filter(function(m){ return m <= rm; });
 function det(ms){ return bk === 'f' ? ms.filter(function(m){ return m >= fs; }) : ms; }
-var bd = g.board || { w:[], p:[], f:[] };
+var bd = (scope === 'q' && g.boardQ) ? g.boardQ : (g.board || { w:[], p:[], f:[] });
 // rows = only the line items that move Working away from the benchmark (|var| >= $1);
 // totals (detW/detB) still cover every line so the unexplained remainder is exact.
 var P = { months:proj, rows:[], detW:0, detB:0, boardW:sum(bd.w, proj), boardB:sum(bd[bk], proj), outB:0 };
@@ -799,7 +815,7 @@ var inScope = Math.abs(w) >= 0.5 || Math.abs(b) >= 0.5;   // lines only in Plan 
 if(inScope && Math.abs(w - b) >= 1) P.rows.push({ it:it, w:w, b:b, v:w - b });
 else if(!inScope) P.outB += b;   // Plan on lines that have no Working: not listed, but kept so the total still reconciles
 // Closed months: Working is actuals without line detail; only the previous forecast has lines there.
-var cb = bk === 'f' ? sum(it[bk], C.detMonths) : 0;
+var cb = sum(it[bk], C.detMonths);   // closed months: the benchmark lines are the only line detail
 if(Math.abs(cb) >= 0.5){ C.rows.push({ it:it, b:cb }); C.detB += cb; }
 });
 P.rows.sort(function(a, b){ return Math.abs(b.v) - Math.abs(a.v); });
@@ -808,8 +824,8 @@ P.unW = P.boardW - P.detW; P.unB = P.boardB - P.detB; P.unV = P.unW - P.unB;
 C.unB = sum(bd[bk], C.detMonths) - C.detB;
 return { gl:g, proj:P, closed:C, vend:V };
 }
-function nvMiniHtml(NV, code, months, bk){
-var s = nvSlice(NV, code, months, bk);
+function nvMiniHtml(NV, code, months, bk, scope){
+var s = nvSlice(NV, code, months, bk, scope);
 if(!s) return '';
 function esc(x){ return String(x == null ? '' : x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function k(n, signed){ if(!isFinite(n) || Math.abs(n) < (signed ? 1 : 0.5)) return '—'; var a = Math.abs(n), t = a >= 1000 ? '$' + (a / 1000).toFixed(a >= 100000 ? 0 : 1) + 'K' : '$' + Math.round(a); if(signed) return (n > 0 ? '+' : '-') + t; return n < 0 ? '(' + t + ')' : t; }
@@ -829,7 +845,15 @@ if(Math.abs(s.proj.unV) >= 1) body += '<tr class="nv-un"><td>Not explained by li
 body += '</tbody></table>';
 }
 if(s.closed.months.length && Math.abs(cv) >= 1){
-body += '<div class="nv-mini-note"><b>' + esc(rng(s.closed.months)) + ' actuals:</b> ' + k(s.closed.boardW) + ' vs ' + bl + ' ' + k(s.closed.boardB) + ' (<span class="' + vc(cv) + '">' + k(cv, true) + '</span>). Actuals carry no line detail' + (s.closed.rows.length ? '; previous forecast lines: ' + s.closed.rows.slice(0, 4).map(function(r){ return esc(r.it.d) + ' ' + k(r.b); }).join(', ') + (s.closed.rows.length > 4 ? ', …' : '') : '') + '.</div>';
+// Actuals arrive as one No Vendor amount; the planned / forecast lines say what the benchmark expected.
+body += '<div class="nv-mini-h">' + esc(rng(s.closed.months)) + ' · actuals: No Vendor ' + k(s.closed.boardW) + ' vs ' + k(s.closed.boardB) + ' ' + bl + ' (<span class="' + vc(cv) + '">' + k(cv, true) + '</span>)</div>';
+if(s.closed.rows.length){
+body += '<table class="nv-mini-t"><thead><tr><th>' + bl + ' line items</th><th>' + bl + '</th></tr></thead><tbody>';
+s.closed.rows.forEach(function(r){ body += '<tr><td>' + esc(r.it.d) + '</td><td>' + k(r.b) + '</td></tr>'; });
+body += '<tr class="nv-un"><td>Actual No Vendor</td><td>' + k(s.closed.boardW) + '</td></tr>';
+body += '</tbody></table>';
+}
+body += '<div class="nv-mini-note">Actuals carry no line detail' + (s.closed.rows.length ? ', so the ' + bl + ' lines show what was expected.' : '.') + '</div>';
 }
 if(!body) return '';
 var h = '<div class="nv-mini">';
@@ -865,7 +889,7 @@ const yearDriverBlocksPlan = deriveYearDriverBlocks(parsed.year, yearPlanVar, 'p
 const yearDriverBlocksFcst = deriveYearDriverBlocks(parsed.year, yearFcstVar, 'f', 75000, yearMonths);
 const yearFirst = parsed.year.dataRows.find(r => r.months && r.months.length === 12);
 const yearMonthLabels = yearFirst ? yearFirst.months.map((x, i) => normalizeMonth(x.label) || fiscalOrder[i]) : fiscalOrder.slice();
-const nv = parsed.nv ? buildNoVendorModel(parsed.nv, parsed.meta, parsed.year.dataRows, yearMonthLabels) : null;
+const nv = parsed.nv ? buildNoVendorModel(parsed.nv, parsed.meta, parsed.year.dataRows, yearMonthLabels, parsed.quarter.dataRows, quarterMonths) : null;
 const hc = parsed.hc ? deriveHc(parsed.hc) : null;
 const trend = deriveTrend(parsed.year, parsed.meta.monthToken, yearExpense.label);
 const te = parsed.te ? deriveTe(parsed.te) : null;
@@ -931,6 +955,7 @@ label: r.label,
 variance: r.variance,
 benchmarkKey,
 months,
+scope: 'q',
 vendors: extractQuarterVendors(q.dataRows, r, benchmarkKey, 'quarter'),
 comments: []
 }));
@@ -1262,7 +1287,7 @@ const glTag = vendor.isNV && vendor.gl ? ` <span class="vrow-gl">· ${escapeHtml
 // No Vendor line items that cause the block's variance (empty when nothing varies -> no toggle).
 let nvDetail = '';
 if(vendor.isNV && vendor.glCode && CURRENT_NV && block && block.months){
-const mini = nvMiniHtml(CURRENT_NV, vendor.glCode, block.months, block.benchmarkKey);
+const mini = nvMiniHtml(CURRENT_NV, vendor.glCode, block.months, block.benchmarkKey, block.scope || 'y');
 if(mini) nvDetail = `<details class="nv-inline"><summary><i class="ti ti-list-details"></i> No Vendor line items</summary>${mini}</details>`;
 }
 return `<div class="vrow" id="${rowId}-row">
@@ -2507,7 +2532,7 @@ data = getData() || { quarter: [], year: [] };
 var rowIndex=Number(cell.dataset.rowIndex), scope=cell.dataset.scope||'q', bk=cell.dataset.benchmark, bl=bk==='p'?'Plan':'Forecast', vendors, threshold, months;
 if(scope==='y'){ var py=cell.dataset.period==='fy'?'fy':Number(cell.dataset.period); vendors=computeY(rowIndex,py,bk); threshold=75; months = py==='fy' ? [0,1,2,3,4,5,6,7,8,9,10,11] : [py*3, py*3+1, py*3+2]; }
 else { var pq=cell.dataset.period==='q'?'q':Number(cell.dataset.period); vendors=computeQ(rowIndex,pq,bk); threshold=25; var qi=data.qIdx||0; months = pq==='q' ? [qi*3, qi*3+1, qi*3+2] : [qi*3+pq]; }
-render({title:cell.dataset.label, periodLabel:cell.dataset.periodLabel, benchmarkLabel:bl, vendors:vendors, threshold:threshold, months:months, bk:bk});
+render({title:cell.dataset.label, periodLabel:cell.dataset.periodLabel, benchmarkLabel:bl, vendors:vendors, threshold:threshold, months:months, bk:bk, scope:scope});
 }
 function render(c){
 ctx=Object.assign({mode:'materiality', threshold:25, search:''}, c);
@@ -2541,7 +2566,7 @@ var maxVal=Math.max.apply(null,[1].concat(shown.map(function(v){return Math.max(
 function bar(v){
 var wPct=Math.min(100,Math.abs(v.working)/maxVal*100), bPct=Math.min(100,Math.abs(v.benchmark)/maxVal*100), over=v.variance>0;
 var vu=v.benchmark?((v.variance>0?'+':'')+Math.round(v.variance/v.benchmark*100)+'%'):(v.working?'not in plan':'—');
-var nvh=(v.nv && data.nv && typeof nvMiniHtml==='function') ? nvMiniHtml(data.nv, v.nv, ctx.months||[], ctx.bk||'p') : '';
+var nvh=(v.nv && data.nv && typeof nvMiniHtml==='function') ? nvMiniHtml(data.nv, v.nv, ctx.months||[], ctx.bk||'p', ctx.scope||'y') : '';
 return '<div class="drill-bar-row'+(nvh?' nv-open':'')+'"><div class="drill-bar-top"><span class="drill-bar-left"><span class="drill-bar-name">'+esc(v.name)+'</span>'+(v.gl?'<button class="drill-gl-btn" type="button" title="Show GL account"><i class="ti ti-eye"></i></button>':'')+(nvh?'<button class="drill-nv-btn" type="button" title="Show No Vendor line items"><i class="ti ti-list-details"></i></button>':'')+'</span><span class="drill-bar-fig">'+fmtKplain(v.working)+' / '+fmtKplain(v.benchmark)+'</span></div><div class="drill-track"><div class="drill-fill '+(over?'unfav':'fav')+'" style="width:'+wPct+'%"></div>'+(v.benchmark?'<div class="drill-plan-marker" style="left:'+bPct+'%"></div>':'')+'</div><div class="drill-util '+(over?'var-unfav':'var-fav')+'">'+esc(vu)+' vs '+esc(ctx.benchmarkLabel.toLowerCase())+' · '+fmtK(v.variance)+'</div>'+(v.gl?'<div class="drill-gl-line"><i class="ti ti-receipt-2"></i>GL account · '+esc(v.gl)+'</div>':'')+(nvh?'<div class="drill-nv">'+nvh+'</div>':'')+'</div>';
 }
 var unfav=shown.filter(function(v){return v.variance>0;}).sort(function(a,b){return b.variance-a.variance;});
