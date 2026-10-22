@@ -222,7 +222,7 @@ function initAnalystBot(DATA){
       if(inScope && Math.abs(w - b) >= 1) o.rows.push({ it:it, w:w, b:b, v:w - b });   // only lines that cause variance
       else if(!inScope) o.outB += b;   // (no longer used: every line with an amount is in scope)
       // Closed months: Working is actuals without lines; only the previous forecast has lines there.
-      var cb = bk === 'f' ? nvSum(it[bk], det(closed)) : 0;
+      var cb = nvSum(it[bk], det(closed));   // closed months: benchmark lines are the only line detail
       if(Math.abs(cb) >= 0.5) o.plan.push({ it:it, b:cb });
     });
     o.rows.sort(function(a, b){ return Math.abs(b.v) - Math.abs(a.v); });
@@ -971,8 +971,14 @@ function initAnalystBot(DATA){
       h += '</tbody></table>';
     }
     if(o.closed.length && g.board && Math.abs(o.cW - o.cB) >= 1){
-      h += '<p class="fb-dim">' + esc(rangeLbl(o.closed)) + ' are closed: actual No Vendor ' + fm(o.cW) + ' vs ' + fm(o.cB) + ' ' + bn + ' (' + vspan(o.cW - o.cB, t) + '). Actuals carry no line detail'
-        + (o.plan.length ? '; previous forecast lines: ' + o.plan.slice(0, 3).map(function(r){ return esc(r.it.d) + ' ' + fm(r.b); }).join(', ') + (o.plan.length > 3 ? ', …' : '') : '') + '.</p>';
+      h += '<p>' + esc(rangeLbl(o.closed)) + ' (closed): actual No Vendor <b>' + fm(o.cW) + '</b> vs ' + fm(o.cB) + ' ' + bn + ' (' + vspan(o.cW - o.cB, t) + ').</p>';
+      if(o.plan.length){
+        h += '<table class="fb-t"><thead><tr><th>' + bn + ' line items</th><th>' + bn + '</th></tr></thead><tbody>';
+        o.plan.slice(0, 6).forEach(function(r){ h += '<tr><td>' + esc(r.it.d) + '</td><td>' + fm(r.b) + '</td></tr>'; });
+        if(o.plan.length > 6) h += '<tr class="fb-more"><td colspan="2">+ ' + (o.plan.length - 6) + ' more</td></tr>';
+        h += '<tr class="fb-bufrow"><td>Actual No Vendor</td><td>' + fm(o.cW) + '</td></tr></tbody></table>';
+      }
+      h += '<p class="fb-dim">Actuals carry no line detail' + (o.plan.length ? ', so the ' + bn + ' lines show what was expected.' : '.') + '</p>';
     }
     return h;
   }
