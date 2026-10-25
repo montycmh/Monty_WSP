@@ -150,8 +150,10 @@ tr:hover td{background:#fafbff}
 .vrow:last-of-type,.hcrow:last-of-type{border-bottom:none}
 .vedit,.hc-edit,.act-text,.add-comment-input{width:100%;border:1px solid var(--line);border-radius:9px;padding:9px 11px;font-size:11.5px;color:#334155;resize:vertical;font-family:inherit;line-height:1.5;background:#fafbff}
 .vedit,.hc-edit{min-height:44px}
+.vedit,.hc-edit,.act-text,textarea.add-comment-input{box-sizing:border-box;overflow:hidden;white-space:pre-wrap;overflow-wrap:anywhere}
+textarea.add-comment-input{resize:none;min-height:38px;display:block}
 .vedit:focus,.hc-edit:focus,.act-text:focus,.add-comment-input:focus{outline:2px solid #c7d2fe;border-color:transparent;background:#fff}
-.inline-add{display:flex;align-items:center;gap:8px;margin-top:8px}
+.inline-add{display:flex;align-items:flex-start;gap:8px;margin-top:8px}
 .inline-add .mini-btn{background:linear-gradient(90deg,#4f46e5,#6366f1);color:#fff;border:none;border-radius:8px;padding:6px 10px;font-size:11px;font-weight:700;cursor:pointer}
 .ghost-btn{display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid #cbd5e1;border-radius:9px;padding:8px 11px;font-size:11px;font-weight:700;cursor:pointer;color:#334155}
 .ghost-btn:hover{border-color:var(--brand);color:var(--brand)}
