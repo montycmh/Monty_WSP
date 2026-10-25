@@ -1273,7 +1273,7 @@ return `<div class="drv-block ${block.variance < 0 ? 'fav-block':'unfav-block'}"
 <div class="drv-vendors-hdr">Vendor Drivers</div>
 ${block.vendors.map((v,i) => renderVendorRow(block.id, i, v, block)).join('')}
 <div class="inline-add">
-<input class="add-comment-input" data-add-input="${block.id}" placeholder="Add comment row..." />
+<textarea class="add-comment-input" rows="1" data-add-input="${block.id}" placeholder="Add comment row..."></textarea>
 <button class="mini-btn" data-add-comment="${block.id}"><i class="ti ti-plus"></i></button>
 </div>
 <div class="drv-footer">Review the underlying service, timing, and whether the current run-rate should carry through the rest of the period.</div>
@@ -1303,7 +1303,7 @@ ${nvDetail}
 }
 function renderAdditionalComments(id){
 return [].map(i => `<div class="comment-row" id="${id}-${i}-row"><textarea class="vedit" rows="2" data-persist="comment:${id}-${i}" placeholder="Additional comment..."></textarea><button class="del-btn" data-del-row="${id}-${i}"><i class="ti ti-trash"></i></button></div>`).join('') +
-`<div class="inline-add"><input class="add-comment-input" data-add-input="${id}" placeholder="Add comment row..." /><button class="mini-btn" data-add-comment="${id}"><i class="ti ti-plus"></i></button></div>`;
+`<div class="inline-add"><textarea class="add-comment-input" rows="1" data-add-input="${id}" placeholder="Add comment row..."></textarea><button class="mini-btn" data-add-comment="${id}"><i class="ti ti-plus"></i></button></div>`;
 }
 function renderNoActivity(id, icon, title, tag){
 return `<section class="sec" id="${id}"><div class="sec-hdr"><div class="sec-hdr-left"><span class="sec-ic"><i class="ti ${icon}"></i></span><span class="sec-title">${escapeHtml(title)}</span></div><span class="sec-tag">${escapeHtml(tag)}</span></div><div class="comment-block" style="text-align:center;padding:30px 16px;color:#64748b;font-size:14px;font-weight:600"><i class="ti ti-info-circle" style="font-size:20px;display:block;margin-bottom:8px;color:#94a3b8"></i>No activity registered for this period.</div></section>`;
@@ -1391,7 +1391,7 @@ addWrap.parentNode.insertBefore(row, addWrap);
 row.querySelector('[data-del-row]').addEventListener('click', () => { row.classList.add('hidden'); saveState(); });
 row.querySelector('[data-persist]').addEventListener('input', e => { autoResize(e.target); saveState(); });
 autoResize(row.querySelector('textarea'));
-if(input) input.value = '';
+if(input){ input.value = ''; input.style.height = ''; }
 saveState();
 }
 function addAction(){
@@ -1416,7 +1416,26 @@ const done = items.filter(el => el.querySelector('.act-cb').checked).length;
 const ctr = document.getElementById('actCtr');
 if(ctr) ctr.textContent = `${done} of ${items.length} completed`;
 }
-function autoResize(el){ if(!el || el.tagName !== 'TEXTAREA') return; el.style.height='auto'; el.style.height = el.scrollHeight + 'px'; }
+// Comment boxes grow with their text: on typing, on window resize, and when a hidden board/tab becomes
+// visible (ResizeObserver). Serialized into exported boards, so it must stay self-contained.
+function installAutoGrow(){
+if(window.__bvaAutoGrow) return; window.__bvaAutoGrow = true;
+function fit(el){ if(!el || el.tagName !== 'TEXTAREA' || !el.offsetParent) return; el.style.height = 'auto'; var b = el.offsetHeight - el.clientHeight; el.style.height = (el.scrollHeight + b) + 'px'; }
+function all(){ document.querySelectorAll('textarea').forEach(fit); }
+window.__bvaFitAll = all;
+document.addEventListener('input', function(e){ if(e.target && e.target.tagName === 'TEXTAREA') fit(e.target); }, true);
+var t = null; window.addEventListener('resize', function(){ clearTimeout(t); t = setTimeout(all, 120); });
+if(window.ResizeObserver && window.MutationObserver){
+var seen = new WeakMap(), widths = new WeakMap();
+var ro = new ResizeObserver(function(entries){ entries.forEach(function(en){ var w = Math.round(en.contentRect.width); if(widths.get(en.target) !== w){ widths.set(en.target, w); fit(en.target); } }); });
+var watch = function(){ document.querySelectorAll('textarea').forEach(function(el){ if(!seen.has(el)){ seen.set(el, 1); ro.observe(el); } }); };
+watch(); new MutationObserver(watch).observe(document.body, { childList:true, subtree:true });
+}
+if(document.readyState === 'complete') setTimeout(all, 0); else window.addEventListener('load', all);
+setTimeout(all, 400);
+}
+function autoResize(el){ if(!el || el.tagName !== 'TEXTAREA' || !el.offsetParent) return; el.style.height='auto'; var b = el.offsetHeight - el.clientHeight; el.style.height = (el.scrollHeight + b) + 'px'; }
+installAutoGrow();
 function syncEditableValues(root){
 const scope = root || document;
 scope.querySelectorAll('textarea').forEach(t => { t.textContent = t.value; });
@@ -1588,7 +1607,8 @@ if(!shouldKeep) s.remove();
 }
 function buildExportScript(){
 return `(function(){
-function autoResize(el){ if(!el) return; el.style.height='auto'; el.style.height = el.scrollHeight + 'px'; }
+function autoResize(el){ if(!el || !el.offsetParent) return; el.style.height='auto'; var b = el.offsetHeight - el.clientHeight; el.style.height = (el.scrollHeight + b) + 'px'; }
+(${installAutoGrow.toString()})();
 document.querySelectorAll('textarea').forEach(autoResize);
 document.querySelectorAll('textarea').forEach(function(el){ el.addEventListener('input', function(){ autoResize(el); }); });
 function updateActionCounter(){
@@ -1676,7 +1696,8 @@ return `(function(){
 var STORAGE_KEY=${KEY},FILE_BASE=${FILE};
 function slug(s){return String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'');}
 function escapeHtml(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-function autoResize(el){if(!el||el.tagName!=='TEXTAREA')return;el.style.height='auto';el.style.height=el.scrollHeight+'px';}
+function autoResize(el){if(!el||el.tagName!=='TEXTAREA'||!el.offsetParent)return;el.style.height='auto';var b=el.offsetHeight-el.clientHeight;el.style.height=(el.scrollHeight+b)+'px';}
+(${installAutoGrow.toString()})();
 function toast(m){var t=document.getElementById('toast');if(!t){t=document.createElement('div');t.id='toast';t.className='toast';document.body.appendChild(t);}t.textContent=m;t.classList.add('show');setTimeout(function(){t.classList.remove('show');},1800);}
 function updateActionCounter(){var items=Array.prototype.slice.call(document.querySelectorAll('.act-item')).filter(function(el){return !el.classList.contains('hidden');});var done=items.filter(function(el){var cb=el.querySelector('.act-cb');return cb&&cb.checked;}).length;var ctr=document.getElementById('actCtr');if(ctr)ctr.textContent=done+' of '+items.length+' completed';}
 function syncEditableValues(root){var scope=root||document;scope.querySelectorAll('textarea').forEach(function(el){el.textContent=el.value;});scope.querySelectorAll('input').forEach(function(el){if(el.type==='checkbox'||el.type==='radio'){if(el.checked)el.setAttribute('checked','checked');else el.removeAttribute('checked');}else{el.setAttribute('value',el.value);}});scope.querySelectorAll('select').forEach(function(select){Array.from(select.options).forEach(function(option){if(option.selected)option.setAttribute('selected','selected');else option.removeAttribute('selected');});});}
@@ -1702,7 +1723,7 @@ Object.keys(payload.actions||{}).forEach(function(key){document.querySelectorAll
 updateActionCounter();document.querySelectorAll('textarea').forEach(autoResize);
 }catch(error){console.error(error);}
 }
-function addCommentRow(blockId){var input=document.querySelector('[data-add-input="'+blockId+'"]');var text=input?input.value.trim():'';var rowId=slug(blockId+'-'+Date.now());var row=document.createElement('div');row.className='comment-row';row.dataset.dynamic='1';row.id=rowId+'-row';row.innerHTML='<textarea class="vedit" rows="2" data-persist="comment:'+rowId+'"></textarea><button class="del-btn" data-del-row="'+rowId+'"><i class="ti ti-trash"></i></button>';var ta=row.querySelector('textarea');ta.value=text;ta.textContent=text;var addWrap=input?input.closest('.inline-add'):null;if(!addWrap)return;addWrap.parentNode.insertBefore(row,addWrap);autoResize(ta);if(input)input.value='';saveState(true);}
+function addCommentRow(blockId){var input=document.querySelector('[data-add-input="'+blockId+'"]');var text=input?input.value.trim():'';var rowId=slug(blockId+'-'+Date.now());var row=document.createElement('div');row.className='comment-row';row.dataset.dynamic='1';row.id=rowId+'-row';row.innerHTML='<textarea class="vedit" rows="2" data-persist="comment:'+rowId+'"></textarea><button class="del-btn" data-del-row="'+rowId+'"><i class="ti ti-trash"></i></button>';var ta=row.querySelector('textarea');ta.value=text;ta.textContent=text;var addWrap=input?input.closest('.inline-add'):null;if(!addWrap)return;addWrap.parentNode.insertBefore(row,addWrap);autoResize(ta);if(input){input.value='';input.textContent='';input.style.height='';}saveState(true);}
 function addAction(){var list=document.getElementById('actList');if(!list)return;var id='act-'+Date.now();var div=document.createElement('div');div.className='act-item';div.dataset.dynamic='1';div.id=id;div.innerHTML='<input type="checkbox" class="act-cb" data-act-cb="'+id+'"><textarea class="act-text" rows="1" data-persist="action:'+id+'" placeholder="New action item..."></textarea><button class="del-btn" data-del-row="'+id+'"><i class="ti ti-trash"></i></button>';list.appendChild(div);autoResize(div.querySelector('textarea'));updateActionCounter();saveState(true);}
 function downloadHtml(){try{syncEditableValues(document);var clone=document.documentElement.cloneNode(true);clone.querySelectorAll('#toast').forEach(function(el){el.remove();});var html='<!DOCTYPE html>\\n'+clone.outerHTML;var blob=new Blob([html],{type:'text/html'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=FILE_BASE+'.html';a.click();URL.revokeObjectURL(a.href);toast('HTML downloaded');}catch(error){console.error(error);toast('Could not export HTML');}}
 function downloadPdf(){if(typeof html2canvas==='undefined'||!window.jspdf){toast('PDF libraries did not load');return;}saveState(false);var target=document.querySelector('.main-workspace');if(!target){toast('Could not find dashboard content');return;}var hiddenEls=Array.prototype.slice.call(target.querySelectorAll('.hidden, .del-btn, .del-block, .add-act, .mini-btn, .ghost-btn, .topbar-actions, #back-nav, #home-nav'));var restore=hiddenEls.map(function(el){return [el,el.style.display];});var aside=document.querySelector('aside');var asideDisplay=aside?aside.style.display:null;var prevML=target.style.marginLeft,prevW=target.style.width;toast('Building PDF...');hiddenEls.forEach(function(el){el.style.display='none';});if(aside)aside.style.display='none';target.style.marginLeft='0';target.style.width='100%';setTimeout(function(){html2canvas(target,{scale:2,useCORS:true,backgroundColor:'#f8fafc'}).then(function(canvas){var jsPDF=window.jspdf.jsPDF;var pdf=new jsPDF('p','pt','a4');var pageWidth=pdf.internal.pageSize.getWidth();var pageHeight=pdf.internal.pageSize.getHeight();var ratio=canvas.width/pageWidth;var pageHeightPx=Math.max(1,Math.floor(pageHeight*ratio));var rendered=0,first=true;while(rendered<canvas.height){var sh=Math.min(pageHeightPx,canvas.height-rendered);var sc=document.createElement('canvas');sc.width=canvas.width;sc.height=sh;sc.getContext('2d').drawImage(canvas,0,rendered,canvas.width,sh,0,0,canvas.width,sh);var img=sc.toDataURL('image/jpeg',0.92);if(!first)pdf.addPage();pdf.addImage(img,'JPEG',0,0,pageWidth,sh/ratio);rendered+=sh;first=false;}pdf.save(FILE_BASE+'.pdf');toast('PDF downloaded');}).catch(function(error){console.error(error);toast('Could not export PDF');}).then(function(){restore.forEach(function(pair){pair[0].style.display=pair[1];});if(aside)aside.style.display=asideDisplay;target.style.marginLeft=prevML;target.style.width=prevW;});},60);}
