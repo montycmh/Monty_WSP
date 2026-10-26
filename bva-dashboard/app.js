@@ -1115,15 +1115,22 @@ REVIEW_Q_IDX = quarterNum(model.meta.currentQuarterLabel);
 CURRENT_NV = model.nv;
 const html = `
 <style>
-#dashboard-root th.tot-col{ background:#eef0f8 !important; color:#1e2761 !important; }
-#dashboard-root td.tot-col{ background:#f7f8fc !important; }
-#dashboard-root th.tot-end, #dashboard-root td.tot-end{ border-right:1px solid #d3d9e6 !important; }
-#dashboard-root th.tot-col:first-of-type, #dashboard-root td.tot-col:first-of-type{ border-left:1px solid #d3d9e6 !important; }
-#dashboard-root th.rev-col{ background:#eef0f8 !important; color:#1e2761 !important; }
-#dashboard-root td.rev-col{ background:#f7f8fc !important; }
-#dashboard-root th.rev-start, #dashboard-root td.rev-start{ border-left:1px solid #d3d9e6 !important; }
-#dashboard-root th.rev-end, #dashboard-root td.rev-end{ border-right:1px solid #d3d9e6 !important; }
-#dashboard-root .tr-exp td.tot-col, #dashboard-root .tr-exp td.rev-col{ background:#eef0f8 !important; }
+/* Highlights for the analysis call: quarter/FY totals = blue, month in review = mint, total row = navy tint */
+#dashboard-root th.tot-col{ background:#dbe6fb !important; color:#1e3a8a !important; }
+#dashboard-root th.tot-col .th-top, #dashboard-root th.tot-col .th-bottom{ color:#1e3a8a !important; }
+#dashboard-root td.tot-col{ background:#eef3fd !important; }
+#dashboard-root th.tot-end, #dashboard-root td.tot-end{ border-right:1px solid #b9cbf2 !important; }
+#dashboard-root th.tot-col:first-of-type, #dashboard-root td.tot-col:first-of-type{ border-left:1px solid #b9cbf2 !important; }
+#dashboard-root th.rev-col{ background:#cdeee0 !important; color:#0b5a40 !important; }
+#dashboard-root th.rev-col .th-top, #dashboard-root th.rev-col .th-bottom{ color:#0b5a40 !important; }
+#dashboard-root td.rev-col{ background:#ebf8f2 !important; }
+#dashboard-root th.rev-start, #dashboard-root td.rev-start{ border-left:2px solid #6cc4a0 !important; }
+#dashboard-root th.rev-end, #dashboard-root td.rev-end{ border-right:2px solid #6cc4a0 !important; }
+#dashboard-root .tr-exp td{ background:#e4e8f4 !important; font-weight:700 !important; border-top:1.5px solid #1e2761 !important; }
+#dashboard-root .tr-exp td.tot-col{ background:#d3e0f8 !important; }
+#dashboard-root .tr-exp td.rev-col{ background:#c3e9d8 !important; }
+#dashboard-root tr:hover td.tot-col{ background:#e3ebfb !important; }
+#dashboard-root tr:hover td.rev-col{ background:#dcf3e8 !important; }
 #dashboard-root textarea.vedit,
 #dashboard-root textarea.hc-edit,
 #dashboard-root textarea.act-text,
@@ -2605,6 +2612,37 @@ window.addEventListener('resize', window.__proChartsResize);
 }
 window.__proChartsDraw = draw;
 }
+// Drag Felipe's window by its header to any place on screen (kept inside the viewport).
+function felipeDrag(){
+if(window.__felipeDrag) return; window.__felipeDrag = true;
+var st = document.createElement('style');
+st.textContent = '#fpa-bot-root .fb-head{cursor:move;user-select:none;touch-action:none}#fpa-bot-root .fb-head button{cursor:pointer}#fpa-bot-root .fb-panel.fb-moved{right:auto!important;bottom:auto!important}';
+(document.head || document.documentElement).appendChild(st);
+var drag = null, pos = null;
+function clamp(p, el){
+var w = el.offsetWidth, h = el.offsetHeight;
+return { x: Math.min(Math.max(8, p.x), window.innerWidth - w - 8), y: Math.min(Math.max(8, p.y), window.innerHeight - h - 8) };
+}
+function place(el){ if(!pos) return; var c = clamp(pos, el); el.classList.add('fb-moved'); el.style.left = c.x + 'px'; el.style.top = c.y + 'px'; }
+document.addEventListener('pointerdown', function(e){
+var head = e.target.closest && e.target.closest('#fpa-bot-root .fb-head');
+if(!head || e.target.closest('button')) return;
+var panel = head.closest('.fb-panel'); if(!panel) return;
+var r = panel.getBoundingClientRect();
+drag = { panel: panel, dx: e.clientX - r.left, dy: e.clientY - r.top };
+e.preventDefault();
+});
+document.addEventListener('pointermove', function(e){
+if(!drag) return;
+pos = { x: e.clientX - drag.dx, y: e.clientY - drag.dy };
+place(drag.panel);
+});
+document.addEventListener('pointerup', function(){ drag = null; });
+window.addEventListener('resize', function(){ var p = document.querySelector('#fpa-bot-root .fb-panel.fb-moved'); if(p) place(p); });
+// When the panel opens again it keeps the last position.
+new MutationObserver(function(){ var p = document.querySelector('#fpa-bot-root .fb-panel.open'); if(p && pos && !p.classList.contains('fb-moved')) place(p); })
+.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['class'], childList: true });
+}
 function appendProChartsScript(clone){
 try{
 if(!clone.querySelector('[data-pro-chart]')) return;
@@ -2877,6 +2915,7 @@ nv: m.nv || null
 function mountAnalystBot(){
 if(typeof initAnalystBot !== 'function') return;
 try{ initAnalystBot(buildBotData()); }catch(e){ console.warn('Could not start the FP&A analyst bot.', e); }
+try{ felipeDrag(); }catch(e){}
 }
 function unmountAnalystBot(){
 ['fpa-bot-root','fpa-bot-style'].forEach(id => { const el = document.getElementById(id); if(el) el.remove(); });
@@ -2886,7 +2925,7 @@ if(typeof initAnalystBot !== 'function') return;
 try{
 const json = JSON.stringify(buildBotData()).replace(/</g, '\\u003c');
 const script = document.createElement('script');
-script.textContent = '(' + initAnalystBot.toString() + ')(' + json + ');';
+script.textContent = '(' + initAnalystBot.toString() + ')(' + json + ');(' + felipeDrag.toString() + ')();';
 const body = clone.querySelector('body');
 if(body) body.appendChild(script);
 }catch(e){ console.warn('Could not embed the FP&A analyst bot into export.', e); }
