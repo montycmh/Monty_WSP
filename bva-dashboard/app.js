@@ -2451,14 +2451,88 @@ delete chartRefs[id];
 }
 }
 function renderCharts(model){
-renderTrendChart(model.year.trend);
+// PRO model: charts are drawn as SVG (sharp at any width and copied as-is into the exported HTML).
+// If SVG drawing fails for any reason, fall back to the Chart.js version.
+try{ swapForSvg('trendC', proTrendSvg(model.year.trend)); }
+catch(e){ console.warn('SVG trend failed, using Chart.js', e); renderTrendChart(model.year.trend); }
 ['sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst'].forEach(id => {
 const node = document.getElementById(id + '-wf-data');
 const data = parseEmbeddedJson(node);
 if(!data) return;
+try{ swapForSvg(id + '-wf', proWaterfallSvg(data)); }
+catch(e){
+console.warn('SVG waterfall failed, using Chart.js', e);
 const padded = waterfallBounds(data.baseStart, data.vars, data.workingEnd);
 buildWF(id + '-wf', data.labels, data.baseStart, data.vars, data.workingEnd, padded.min, padded.max);
+}
 });
+}
+function swapForSvg(canvasId, svg){
+const canvas = document.getElementById(canvasId);
+if(!canvas || !svg) throw new Error('missing ' + canvasId);
+destroyChart(canvasId);
+const wrap = canvas.parentNode;
+wrap.classList.add('pro-svg');
+wrap.innerHTML = svg;
+}
+function proK(v){ const a = Math.abs(v) / 1000; return '$' + (a >= 100 ? Math.round(a).toLocaleString('en-US') : a.toFixed(a >= 10 ? 0 : 1)) + 'K'; }
+function proEsc(t){ return String(t == null ? '' : t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// Waterfall: navy totals, green/red steps, axis zoomed to where the steps move.
+function proWaterfallSvg(d){
+const FAV='#047857', UNFAV='#c0262d', TOT='#1e2761', INK='#0f1530', MUTED='#5b6385', LINE='#e2e6ef';
+const W=1000, H=300, padL=16, padR=16, top=34, bot=56, n=d.labels.length;
+const steps=[]; let cum=d.baseStart;
+steps.push({lab:d.labels[0], a:0, b:d.baseStart, type:'tot', v:d.baseStart});
+d.vars.forEach((v,i) => { steps.push({lab:d.labels[i+1], a:cum, b:cum+v, type:v>0?'unf':'fav', v}); cum+=v; });
+steps.push({lab:d.labels[n-1], a:0, b:d.workingEnd, type:'tot', v:d.workingEnd});
+const vals=[]; steps.forEach(st => { if(st.type!=='tot') vals.push(st.a, st.b); else vals.push(st.b); });
+const pos=vals.filter(x => x > 0); if(!pos.length) throw new Error('no data');
+const mx=Math.max(...pos), mn=Math.min(...pos);
+const span=Math.max(mx-mn, mx*0.02), lo=Math.max(0, mn-span*1.2), hi=mx+span*0.35;
+const y=v => top+(H-top-bot)*(1-(v-lo)/(hi-lo));
+const cw=(W-padL-padR)/n, bw=Math.min(110, cw*0.56), out=[];
+out.push(`<line x1="${padL}" x2="${W-padR}" y1="${H-bot}" y2="${H-bot}" stroke="${LINE}"/>`);
+steps.forEach((st,i) => {
+const x=padL+cw*i+(cw-bw)/2; let y1=y(Math.max(st.a,st.b)), y2=st.type==='tot'?H-bot:y(Math.min(st.a,st.b));
+if(y2-y1<3) y2=y1+3;
+const c=st.type==='tot'?TOT:(st.type==='fav'?FAV:UNFAV);
+out.push(`<rect x="${x}" y="${y1}" width="${bw}" height="${y2-y1}" rx="5" fill="${c}"${st.type==='tot'?'':' fill-opacity=".9"'}/>`);
+if(i<steps.length-1){ const nx=padL+cw*(i+1)+(cw-bw)/2; out.push(`<line x1="${x+bw}" x2="${nx}" y1="${y(st.b)}" y2="${y(st.b)}" stroke="#aab2cc" stroke-dasharray="3 3"/>`); }
+const lab=st.type==='tot'?proK(st.v):(st.v>0?'+':'\u2212')+proK(st.v);
+out.push(`<text x="${x+bw/2}" y="${y1-9}" text-anchor="middle" font-size="15" font-weight="600" fill="${st.type==='tot'?INK:c}" font-family="Geist Mono,ui-monospace,monospace">${lab}</text>`);
+const name=String(st.lab), words=name.split(' '); let l1=name, l2='';
+if(name.length>18){ const half=Math.ceil(words.length/2); l1=words.slice(0,half).join(' '); l2=words.slice(half).join(' '); }
+out.push(`<text x="${x+bw/2}" y="${H-bot+22}" text-anchor="middle" font-size="13" fill="${MUTED}" font-family="Geist,system-ui,sans-serif">${proEsc(l1)}</text>`);
+if(l2) out.push(`<text x="${x+bw/2}" y="${H-bot+39}" text-anchor="middle" font-size="13" fill="${MUTED}" font-family="Geist,system-ui,sans-serif">${proEsc(l2)}</text>`);
+});
+if(lo>0) out.push(`<text x="${padL}" y="16" font-size="11" fill="#8a92b0" font-family="Geist,system-ui,sans-serif">Axis starts at ${proK(lo)} to show the variances</text>`);
+return `<svg class="pro-wf" viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Waterfall">${out.join('')}</svg>`;
+}
+// Trend: Working (green, filled) vs Plan (blue, dashed), one point per elapsed month.
+function proTrendSvg(t){
+const WORK='#15803d', PLANC='#2563eb', GRID='#eef0f6', MUTED='#5b6385', FAINT='#8a92b0';
+const W=1000, H=230, padL=58, padR=18, top=14, bot=30, labels=t.labels||[], n=labels.length;
+if(!n) throw new Error('no trend');
+const all=[...(t.working||[]), ...(t.plan||[])].filter(Number.isFinite);
+if(!all.length) throw new Error('no trend data');
+const step=50000, lo=Math.max(0, Math.floor((Math.min(...all)-step)/step)*step), hi=Math.ceil((Math.max(...all)+step/2)/step)*step;
+const x=i => n===1 ? (padL+W-padR)/2 : padL+(W-padL-padR)*i/(n-1);
+const y=v => top+(H-top-bot)*(1-(v-lo)/(hi-lo));
+const out=[];
+for(let v=lo; v<=hi+1; v+=step){ out.push(`<line x1="${padL}" x2="${W-padR}" y1="${y(v)}" y2="${y(v)}" stroke="${GRID}"/><text x="${padL-10}" y="${y(v)+4}" text-anchor="end" font-size="11" fill="${FAINT}" font-family="Geist Mono,ui-monospace,monospace">${proK(v)}</text>`); }
+labels.forEach((l,i) => out.push(`<text x="${x(i)}" y="${H-8}" text-anchor="middle" font-size="12" fill="${MUTED}" font-family="Geist,system-ui,sans-serif">${proEsc(l)}</text>`));
+function pts(arr){ return arr.map((v,i) => Number.isFinite(v) ? [x(i), y(v)] : null).filter(Boolean); }
+function curve(p){ if(!p.length) return ''; let dd=`M${p[0][0]},${p[0][1]}`; for(let i=0;i<p.length-1;i++){ const p0=p[i-1]||p[i], p1=p[i], p2=p[i+1], p3=p[i+2]||p2; const c1x=p1[0]+(p2[0]-p0[0])/6, c1y=p1[1]+(p2[1]-p0[1])/6, c2x=p2[0]-(p3[0]-p1[0])/6, c2y=p2[1]-(p3[1]-p1[1])/6; dd+=` C${c1x},${c1y} ${c2x},${c2y} ${p2[0]},${p2[1]}`; } return dd; }
+function series(arr, color, fill, dash){
+const p=pts(arr||[]); if(!p.length) return;
+const c=curve(p), base=H-bot;
+out.push(`<path d="${c} L${p[p.length-1][0]},${base} L${p[0][0]},${base} Z" fill="${color}" fill-opacity="${fill}"/>`);
+out.push(`<path d="${c}" fill="none" stroke="${color}" stroke-width="2.5"${dash?' stroke-dasharray="6 5"':''} stroke-linecap="round"/>`);
+p.forEach(q => out.push(`<circle cx="${q[0]}" cy="${q[1]}" r="4" fill="${color}" stroke="#fff" stroke-width="1.5"/>`));
+}
+series(t.plan, PLANC, 0.08, true);
+series(t.working, WORK, 0.16, false);
+return `<svg class="pro-trend" viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Trend">${out.join('')}</svg>`;
 }
 function waterfallBounds(base, vars, end){
 let run = base;
@@ -2479,12 +2553,21 @@ lblColors.push(v < 0 ? PRO.fav : PRO.unfav);
 run += v;
 });
 bases.push(0); bars.push(endVal); bgs.push(PRO.navy); lblColors.push(PRO.ink);
-function k(n){ return '$' + Math.round(Math.abs(n) / 1000).toLocaleString('en-US') + 'K'; }
+function k(n){ var a = Math.abs(n) / 1000; return '$' + (a >= 100 ? Math.round(a).toLocaleString('en-US') : a.toFixed(a >= 10 ? 0 : 1)) + 'K'; }
 function wrap(label){
 var t = String(label || ''); if(t.length <= 16) return t;
 var w = t.split(' '), half = Math.ceil(w.length / 2);
 return [w.slice(0, half).join(' '), w.slice(half).join(' ')];
 }
+// Tight axis (PRO model): zoom to the range the steps move in so variances are readable.
+var ends = [baseVal, endVal], r2 = baseVal;
+varsArr.forEach(function(v){ ends.push(r2, r2 + v); r2 += v; });
+ends = ends.filter(function(n){ return isFinite(n) && n > 0; });
+if (ends.length) {
+var mx = Math.max.apply(null, ends), mn = Math.min.apply(null, ends), span = Math.max(mx - mn, mx * 0.02);
+yMin = Math.max(0, mn - span * 1.2); yMax = mx + span * 0.35;
+}
+var axisNote = yMin > 0 ? 'Axis starts at ' + k(yMin) + ' to show the variances' : '';
 var canvas = document.getElementById(canvasId); if (!canvas) return;
 destroyChart(canvasId);
 chartRefs[canvasId] = new Chart(canvas, {
@@ -2493,7 +2576,7 @@ data: {
 labels: labels.map(wrap),
 datasets: [
 { data: bases, backgroundColor: 'rgba(0,0,0,0)', borderWidth: 0, datalabels: { display: false } },
-{ data: bars, backgroundColor: bgs, borderWidth: 0, borderRadius: 5, maxBarThickness: 96, categoryPercentage: 0.72, barPercentage: 0.9,
+{ data: bars, backgroundColor: bgs, borderWidth: 0, borderRadius: 5, maxBarThickness: 110, categoryPercentage: 0.7, barPercentage: 0.9,
 datalabels: {
 display: true, anchor: 'end', align: 'end', offset: 4,
 color: function(ctx){ return lblColors[ctx.dataIndex]; },
@@ -2511,10 +2594,11 @@ return (o > 0 ? '+' : '−') + k(o);
 options: {
 responsive: true, maintainAspectRatio: false, layout: { padding: { top: 34, left: 4, right: 4 } },
 scales: {
-x: { stacked: true, grid: { display: false }, border: { color: '#e2e6ef' }, ticks: { font: { size: 12, weight: '500' }, color: PRO.muted, autoSkip: false, maxRotation: 0 } },
-y: { stacked: true, min: yMin, max: yMax, border: { display: false }, grid: { color: PRO.grid }, ticks: { font: { size: 10.5 }, color: PRO.faint, maxTicksLimit: 6, callback: function(v) { return '$' + Math.round(v/1000).toLocaleString('en-US') + 'K'; } } }
+x: { stacked: true, grid: { display: false }, border: { color: '#e2e6ef' }, ticks: { font: { size: 13, weight: '500' }, color: PRO.muted, autoSkip: false, maxRotation: 0, padding: 8 } },
+y: { stacked: true, min: yMin, max: yMax, display: false }
 },
-plugins: { legend: { display: false }, tooltip: { enabled: false } }
+plugins: { legend: { display: false }, tooltip: { enabled: false },
+title: { display: !!axisNote, text: axisNote, align: 'start', color: '#8a92b0', font: { size: 11.5, weight: '400' }, padding: { top: 0, bottom: 18 } } }
 }
 });
 }
