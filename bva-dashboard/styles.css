@@ -473,9 +473,10 @@ aside nav ul li.active i{color:var(--mint);opacity:1}
 .badge{font-size:10.5px;font-weight:600;letter-spacing:.06em;border-radius:6px;padding:3px 8px}
 
 /* Charts */
-.chart-legend{background:transparent;border:0;padding:0;gap:18px}
-.legend-key{font-size:12px;font-weight:500;color:var(--muted)}
-.legend-swatch.work{background:var(--brand)}
+.chart-legend{gap:18px;padding:8px 14px;border-radius:10px;background:#f3f5fa;border:1px solid var(--line)}
+.legend-key{font-size:12px;font-weight:600;color:#36406b}
+.legend-swatch.work{background:#15803d;height:3px}
+.legend-swatch.plan.dashed{background:linear-gradient(90deg,#2563eb 50%,transparent 50%);background-size:8px 100%}
 .legend-swatch.plan{background:var(--muted2)}
 .legend-swatch.plan.dashed{background:linear-gradient(90deg,var(--muted2) 50%,transparent 50%);background-size:8px 100%}
 .trend-wrap{height:230px}
@@ -619,3 +620,8 @@ tr:hover td{background:#f8f9fc}
 
 @media (max-width:860px){.main-workspace>.sec,#dashboard-root{margin-left:16px;margin-right:16px}.topbar-inner{padding:22px 16px}}
 @media print{.topbar{background:#1e2761!important}.topbar-title{-webkit-text-fill-color:#fff}}
+
+/* PRO SVG charts (trend + waterfall) */
+.trend-wrap.pro-svg{height:auto!important;background:#fff;border:1px solid var(--line);border-radius:12px;padding:18px 18px 10px}
+.wf-wrap.pro-svg{height:auto!important;padding:18px 18px 8px}
+.pro-svg svg{display:block;width:100%;height:auto;overflow:visible}
