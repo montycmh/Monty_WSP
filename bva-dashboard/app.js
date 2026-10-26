@@ -1,5 +1,9 @@
 (function(){
 Chart.register(ChartDataLabels);
+// PRO theme: chart typography matches the board (Geist; falls back to the system font).
+Chart.defaults.font.family = '"Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+Chart.defaults.color = '#5b6385';
+const PRO = { navy:'#1e2761', fav:'#047857', unfav:'#c0262d', ink:'#0f1530', muted:'#5b6385', faint:'#8a92b0', grid:'#eef0f6' };
 const state = {
 files: { quarter:null, year:null, hc:null, te:null, opex:null, nv:null },
 model: null,
@@ -321,7 +325,8 @@ if(dom.launcher){ dom.launcher.classList.add('hidden'); dom.launcher.innerHTML =
 showError('');
 document.getElementById('upload-shell').classList.remove('hidden');
 dom.sidebarFooter.textContent = 'Upload Quarter and Year feeds to generate a board (HC, T&E, OPEX and No Vendor optional).';
-document.querySelectorAll('aside nav ul li').forEach((li, idx) => li.classList.toggle('active', idx===0));
+document.querySelectorAll('aside nav ul li[data-nav]').forEach((li, idx) => li.classList.toggle('active', idx===0));
+resetBoardHeader();
 setBoardCount(1);
 updateBuildButton();
 }
@@ -333,7 +338,8 @@ if(dom.backNav) dom.backNav.classList.add('hidden');
 if(dom.homeNav) dom.homeNav.classList.remove('hidden');
 if(dom.budgetUtilNav) dom.budgetUtilNav.classList.add('hidden');
 showError('');
-document.querySelectorAll('aside nav ul li').forEach((li, idx) => li.classList.toggle('active', idx===0));
+document.querySelectorAll('aside nav ul li[data-nav]').forEach((li, idx) => li.classList.toggle('active', idx===0));
+resetBoardHeader();
 window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 async function buildDashboard(files){
@@ -1070,25 +1076,58 @@ if(hc && hc.topVarianceEmployees[0]) actions.push(`Confirm HC variance driver fo
 while(actions.length < 6) actions.push('Review any remaining variance outside the top drivers and confirm whether follow-up is needed before close.');
 return actions.slice(0,6);
 }
+// PRO theme: the header and sidebar say which board this is (BU · month FY), instead of the generator text.
+const MONTH_LONG = { Jan:'January', Feb:'February', Mar:'March', Apr:'April', May:'May', Jun:'June', Jul:'July', Aug:'August', Sep:'September', Oct:'October', Nov:'November', Dec:'December' };
+const GENERATOR_HEADER = { kicker:'FP&A · Board generator', title:'BvA Dashboard', sub:'Upload Quarter, Year, HC, T&E and No Vendor feeds to build a reusable BvA board.' };
+function applyBoardHeader(model){
+const m = model.meta;
+const month = MONTH_LONG[m.monthToken] || m.monthToken;
+const set = (id, text) => { const el = document.getElementById(id); if(el) el.textContent = text; };
+set('topbar-kicker', 'Budget vs Actual');
+set('topbar-title', `${m.dashboardCode} · ${month} ${m.fyToken}`);
+set('topbar-sub', `Monthly variance review against ${m.fyToken} Plan and ${m.forecastLabel} — quarter and full year.`);
+const meta = document.getElementById('topbar-meta');
+if(meta){
+meta.innerHTML = [['Business unit', m.dashboardCode], ['Period', `${m.monthToken} ${m.fyToken}`], ['Quarter', m.currentQuarterLabel], ['Prepared by', m.preparedBy]]
+.map(([k, val]) => `<div><span>${escapeHtml(k)}</span><b>${escapeHtml(val)}</b></div>`).join('');
+meta.classList.remove('hidden');
+}
+const side = document.getElementById('side-board-meta');
+if(side){
+side.innerHTML = `<b>${escapeHtml(m.dashboardCode)}</b><span>${escapeHtml(m.monthToken + ' ' + m.fyToken + ' · ' + m.currentQuarterLabel)}</span>`;
+side.classList.remove('hidden');
+}
+document.title = `${m.dashboardCode} · ${m.monthToken} ${m.fyToken} — BvA Board`;
+}
+function resetBoardHeader(){
+const set = (id, text) => { const el = document.getElementById(id); if(el) el.textContent = text; };
+set('topbar-kicker', GENERATOR_HEADER.kicker);
+set('topbar-title', GENERATOR_HEADER.title);
+set('topbar-sub', GENERATOR_HEADER.sub);
+['topbar-meta', 'side-board-meta'].forEach(id => { const el = document.getElementById(id); if(el){ el.innerHTML = ''; el.classList.add('hidden'); } });
+document.title = 'BvA Dashboard Generator';
+}
 function renderDashboard(model){
 document.getElementById('upload-shell').classList.add('hidden');
+applyBoardHeader(model);
 REVIEW_MONTH_IDX = model.quarter.monthLabels.findIndex(m => normalizeMonth(m) === model.meta.monthToken);
 REVIEW_Q_IDX = quarterNum(model.meta.currentQuarterLabel);
 CURRENT_NV = model.nv;
 const html = `
 <style>
-#dashboard-root th.tot-col{ background:#e0e7ff !important; color:#312e81 !important; }
-#dashboard-root td.tot-col{ background:#eef2ff !important; }
-#dashboard-root th.tot-end, #dashboard-root td.tot-end{ border-right:2px solid #a5b4fc !important; }
-#dashboard-root th.tot-col:first-of-type, #dashboard-root td.tot-col:first-of-type{ border-left:2px solid #a5b4fc !important; }
-#dashboard-root th.rev-col{ background:#e0e7ff !important; color:#312e81 !important; }
-#dashboard-root td.rev-col{ background:#eef2ff !important; }
-#dashboard-root th.rev-start, #dashboard-root td.rev-start{ border-left:2px solid #a5b4fc !important; }
-#dashboard-root th.rev-end, #dashboard-root td.rev-end{ border-right:2px solid #a5b4fc !important; }
+#dashboard-root th.tot-col{ background:#eef0f8 !important; color:#1e2761 !important; }
+#dashboard-root td.tot-col{ background:#f7f8fc !important; }
+#dashboard-root th.tot-end, #dashboard-root td.tot-end{ border-right:1px solid #d3d9e6 !important; }
+#dashboard-root th.tot-col:first-of-type, #dashboard-root td.tot-col:first-of-type{ border-left:1px solid #d3d9e6 !important; }
+#dashboard-root th.rev-col{ background:#eef0f8 !important; color:#1e2761 !important; }
+#dashboard-root td.rev-col{ background:#f7f8fc !important; }
+#dashboard-root th.rev-start, #dashboard-root td.rev-start{ border-left:1px solid #d3d9e6 !important; }
+#dashboard-root th.rev-end, #dashboard-root td.rev-end{ border-right:1px solid #d3d9e6 !important; }
+#dashboard-root .tr-exp td.tot-col, #dashboard-root .tr-exp td.rev-col{ background:#eef0f8 !important; }
 #dashboard-root textarea.vedit,
 #dashboard-root textarea.hc-edit,
 #dashboard-root textarea.act-text,
-#dashboard-root .add-comment-input{ font-size:13.5px !important; line-height:1.5 !important; color:#0f172a !important; }
+#dashboard-root .add-comment-input{ font-size:13.5px !important; line-height:1.5 !important; color:#0f1530 !important; }
 #dashboard-root .vrow p,
 #dashboard-root .hcrow p{ font-size:13px !important; }
 </style>
@@ -1291,13 +1330,13 @@ const mini = nvMiniHtml(CURRENT_NV, vendor.glCode, block.months, block.benchmark
 if(mini) nvDetail = `<details class="nv-inline"><summary><i class="ti ti-list-details"></i> No Vendor line items</summary>${mini}</details>`;
 }
 return `<div class="vrow" id="${rowId}-row">
-<span style="width:8px;height:8px;border-radius:50%;background:${vendor.variance<0?'#16a34a':'#e11d48'};flex-shrink:0;margin-top:3px"></span>
+<span style="width:8px;height:8px;border-radius:50%;background:${vendor.variance<0?'var(--fav)':'var(--unfav)'};flex-shrink:0;margin-top:4px"></span>
 <div style="flex:1;min-width:0">
-<p style="font-size:11.5px;font-weight:600;color:#0f172a;margin-bottom:3px">${escapeHtml(vendor.name)}${glTag}</p>
+<p style="font-size:12px;font-weight:600;color:var(--ink);margin-bottom:3px">${escapeHtml(vendor.name)}${glTag}</p>
 ${nvDetail}
 <textarea class="vedit" rows="2" data-persist="comment:${rowId}">${escapeHtml(vendor.comment || '')}</textarea>
 </div>
-<span style="font-size:12px;font-weight:600;color:${vendor.variance<0?'#16a34a':'#e11d48'};flex-shrink:0;margin-top:2px;min-width:48px;text-align:right">${fmtK(vendor.variance)}</span>
+<span style="font-size:12.5px;font-weight:600;font-family:var(--mono);color:${vendor.variance<0?'var(--fav)':'var(--unfav)'};flex-shrink:0;margin-top:2px;min-width:52px;text-align:right">${fmtK(vendor.variance)}</span>
 <button class="del-btn" data-del-row="${rowId}"><i class="ti ti-trash"></i></button>
 </div>`;
 }
@@ -1350,7 +1389,7 @@ ${hcRow('New Hires (not in plan)', 0, m.newHires)}
 ${hcRow('Ending HC', m.endingPlan, m.endingWork, true)}
 </tbody></table></div>
 <div class="sublbl">Employee commentary</div>
-<div>${model.hc.topVarianceEmployees.map((r,i)=>`<div class="hcrow" id="hc-${i}-row"><span style="width:8px;height:8px;border-radius:50%;background:${r.variance<0?'#16a34a':'#e11d48'};flex-shrink:0;margin-top:3px"></span><div style="flex:1"><p style="font-size:11.5px;font-weight:600;color:#0f172a;margin-bottom:3px">${escapeHtml(r.name)}</p><textarea class="hc-edit" rows="2" data-persist="comment:hc-${i}">${escapeHtml(r.comment)}</textarea></div><span style="font-size:12px;font-weight:600;color:${r.variance<0?'#16a34a':'#e11d48'};min-width:48px;text-align:right">${fmtK(r.variance)}</span><button class="del-btn" data-del-row="hc-${i}"><i class="ti ti-trash"></i></button></div>`).join('')}</div>
+<div>${model.hc.topVarianceEmployees.map((r,i)=>`<div class="hcrow" id="hc-${i}-row"><span style="width:8px;height:8px;border-radius:50%;background:${r.variance<0?'var(--fav)':'var(--unfav)'};flex-shrink:0;margin-top:4px"></span><div style="flex:1"><p style="font-size:12px;font-weight:600;color:var(--ink);margin-bottom:3px">${escapeHtml(r.name)}</p><textarea class="hc-edit" rows="2" data-persist="comment:hc-${i}">${escapeHtml(r.comment)}</textarea></div><span style="font-size:12.5px;font-weight:600;font-family:var(--mono);color:${r.variance<0?'var(--fav)':'var(--unfav)'};min-width:52px;text-align:right">${fmtK(r.variance)}</span><button class="del-btn" data-del-row="hc-${i}"><i class="ti ti-trash"></i></button></div>`).join('')}</div>
 </section>`;
 }
 function hcRow(label, plan, work, highlight){
@@ -1726,7 +1765,7 @@ updateActionCounter();document.querySelectorAll('textarea').forEach(autoResize);
 function addCommentRow(blockId){var input=document.querySelector('[data-add-input="'+blockId+'"]');var text=input?input.value.trim():'';var rowId=slug(blockId+'-'+Date.now());var row=document.createElement('div');row.className='comment-row';row.dataset.dynamic='1';row.id=rowId+'-row';row.innerHTML='<textarea class="vedit" rows="2" data-persist="comment:'+rowId+'"></textarea><button class="del-btn" data-del-row="'+rowId+'"><i class="ti ti-trash"></i></button>';var ta=row.querySelector('textarea');ta.value=text;ta.textContent=text;var addWrap=input?input.closest('.inline-add'):null;if(!addWrap)return;addWrap.parentNode.insertBefore(row,addWrap);autoResize(ta);if(input){input.value='';input.textContent='';input.style.height='';}saveState(true);}
 function addAction(){var list=document.getElementById('actList');if(!list)return;var id='act-'+Date.now();var div=document.createElement('div');div.className='act-item';div.dataset.dynamic='1';div.id=id;div.innerHTML='<input type="checkbox" class="act-cb" data-act-cb="'+id+'"><textarea class="act-text" rows="1" data-persist="action:'+id+'" placeholder="New action item..."></textarea><button class="del-btn" data-del-row="'+id+'"><i class="ti ti-trash"></i></button>';list.appendChild(div);autoResize(div.querySelector('textarea'));updateActionCounter();saveState(true);}
 function downloadHtml(){try{syncEditableValues(document);var clone=document.documentElement.cloneNode(true);clone.querySelectorAll('#toast').forEach(function(el){el.remove();});var html='<!DOCTYPE html>\\n'+clone.outerHTML;var blob=new Blob([html],{type:'text/html'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=FILE_BASE+'.html';a.click();URL.revokeObjectURL(a.href);toast('HTML downloaded');}catch(error){console.error(error);toast('Could not export HTML');}}
-function downloadPdf(){if(typeof html2canvas==='undefined'||!window.jspdf){toast('PDF libraries did not load');return;}saveState(false);var target=document.querySelector('.main-workspace');if(!target){toast('Could not find dashboard content');return;}var hiddenEls=Array.prototype.slice.call(target.querySelectorAll('.hidden, .del-btn, .del-block, .add-act, .mini-btn, .ghost-btn, .topbar-actions, #back-nav, #home-nav'));var restore=hiddenEls.map(function(el){return [el,el.style.display];});var aside=document.querySelector('aside');var asideDisplay=aside?aside.style.display:null;var prevML=target.style.marginLeft,prevW=target.style.width;toast('Building PDF...');hiddenEls.forEach(function(el){el.style.display='none';});if(aside)aside.style.display='none';target.style.marginLeft='0';target.style.width='100%';setTimeout(function(){html2canvas(target,{scale:2,useCORS:true,backgroundColor:'#f8fafc'}).then(function(canvas){var jsPDF=window.jspdf.jsPDF;var pdf=new jsPDF('p','pt','a4');var pageWidth=pdf.internal.pageSize.getWidth();var pageHeight=pdf.internal.pageSize.getHeight();var ratio=canvas.width/pageWidth;var pageHeightPx=Math.max(1,Math.floor(pageHeight*ratio));var rendered=0,first=true;while(rendered<canvas.height){var sh=Math.min(pageHeightPx,canvas.height-rendered);var sc=document.createElement('canvas');sc.width=canvas.width;sc.height=sh;sc.getContext('2d').drawImage(canvas,0,rendered,canvas.width,sh,0,0,canvas.width,sh);var img=sc.toDataURL('image/jpeg',0.92);if(!first)pdf.addPage();pdf.addImage(img,'JPEG',0,0,pageWidth,sh/ratio);rendered+=sh;first=false;}pdf.save(FILE_BASE+'.pdf');toast('PDF downloaded');}).catch(function(error){console.error(error);toast('Could not export PDF');}).then(function(){restore.forEach(function(pair){pair[0].style.display=pair[1];});if(aside)aside.style.display=asideDisplay;target.style.marginLeft=prevML;target.style.width=prevW;});},60);}
+function downloadPdf(){if(typeof html2canvas==='undefined'||!window.jspdf){toast('PDF libraries did not load');return;}saveState(false);var target=document.querySelector('.main-workspace');if(!target){toast('Could not find dashboard content');return;}var hiddenEls=Array.prototype.slice.call(target.querySelectorAll('.hidden, .del-btn, .del-block, .add-act, .mini-btn, .ghost-btn, .topbar-actions, #back-nav, #home-nav'));var restore=hiddenEls.map(function(el){return [el,el.style.display];});var aside=document.querySelector('aside');var asideDisplay=aside?aside.style.display:null;var prevML=target.style.marginLeft,prevW=target.style.width;toast('Building PDF...');hiddenEls.forEach(function(el){el.style.display='none';});if(aside)aside.style.display='none';target.style.marginLeft='0';target.style.width='100%';setTimeout(function(){html2canvas(target,{scale:2,useCORS:true,backgroundColor:'#f6f8fc'}).then(function(canvas){var jsPDF=window.jspdf.jsPDF;var pdf=new jsPDF('p','pt','a4');var pageWidth=pdf.internal.pageSize.getWidth();var pageHeight=pdf.internal.pageSize.getHeight();var ratio=canvas.width/pageWidth;var pageHeightPx=Math.max(1,Math.floor(pageHeight*ratio));var rendered=0,first=true;while(rendered<canvas.height){var sh=Math.min(pageHeightPx,canvas.height-rendered);var sc=document.createElement('canvas');sc.width=canvas.width;sc.height=sh;sc.getContext('2d').drawImage(canvas,0,rendered,canvas.width,sh,0,0,canvas.width,sh);var img=sc.toDataURL('image/jpeg',0.92);if(!first)pdf.addPage();pdf.addImage(img,'JPEG',0,0,pageWidth,sh/ratio);rendered+=sh;first=false;}pdf.save(FILE_BASE+'.pdf');toast('PDF downloaded');}).catch(function(error){console.error(error);toast('Could not export PDF');}).then(function(){restore.forEach(function(pair){pair[0].style.display=pair[1];});if(aside)aside.style.display=asideDisplay;target.style.marginLeft=prevML;target.style.width=prevW;});},60);}
 function navTo(sectionId,el){var target=document.getElementById(sectionId);if(!target)return;var top=target.getBoundingClientRect().top+window.scrollY-20;window.scrollTo({top:top,behavior:'smooth'});document.querySelectorAll('aside nav ul li[data-nav]').forEach(function(li){li.classList.remove('active');});if(el)el.classList.add('active');}
 function scrollSpy(){var sections=['sec-overview','sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst','sec-te','sec-hc','sec-actions'];var navItems=document.querySelectorAll('aside nav ul li[data-nav]');var sy=window.scrollY+80;var current=0;sections.forEach(function(id,i){var el=document.getElementById(id);if(el&&el.offsetTop<=sy)current=i;});navItems.forEach(function(li){li.classList.remove('active');});if(navItems[current])navItems[current].classList.add('active');}
 document.body.addEventListener('click',function(e){var target=e.target;if(!target.closest)return;var delRow=target.closest('[data-del-row]');if(delRow){var id=delRow.dataset.delRow;var row=document.getElementById(id+'-row')||document.getElementById(id);if(row)row.classList.add('hidden');saveState(true);updateActionCounter();return;}var delBlock=target.closest('[data-del-block]');if(delBlock){var wrap=document.getElementById(delBlock.dataset.delBlock+'-wrap');if(wrap)wrap.classList.add('hidden');saveState(true);return;}var addComment=target.closest('[data-add-comment]');if(addComment){addCommentRow(addComment.dataset.addComment);return;}if(target.closest('#add-act')){addAction();return;}if(target.closest('#save-nav')){saveState(true);return;}if(target.closest('#download-nav')){downloadHtml();return;}if(target.closest('#download-pdf-nav')){downloadPdf();return;}var nav=target.closest('aside nav ul li[data-nav]');if(nav){navTo(nav.dataset.nav,nav);return;}});
@@ -1820,6 +1859,7 @@ state.model = null;
 document.getElementById('upload-shell').classList.remove('hidden');
 if(dom.backNav) dom.backNav.classList.add('hidden');
 if(dom.homeNav) dom.homeNav.classList.remove('hidden');
+resetBoardHeader();
 renderLauncher();
 toast(`${state.generated.length} boards ready`);
 }catch(e){
@@ -2022,7 +2062,7 @@ display:block!important;
 width:calc(100% - 244px)!important;
 max-width:none!important;
 margin-left:244px!important;
-padding:28px 30px 56px!important;
+padding:0 0 56px!important;
 overflow-x:hidden!important;
 }
 .trend-wrap,
@@ -2074,8 +2114,8 @@ padding:0;
 overflow:hidden;
 }
 body{
-font-family:Inter,Arial,sans-serif;
-background:#eef2fb;
+font-family:"Geist",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+background:#f6f8fc;
 color:#0f172a;
 }
 .hub{
@@ -2104,10 +2144,10 @@ flex-shrink:0;
 .hub-sub{margin-top:5px;color:#64748b;font-size:12px}
 .hub-actions{display:flex;gap:9px}
 .hub-btn{border:1px solid #cbd5e1;border-radius:9px;padding:10px 14px;background:#fff;color:#334155;font-weight:800;cursor:pointer}
-.hub-btn.primary{background:#4f46e5;color:#fff;border-color:#4f46e5}
+.hub-btn.primary{background:#1e2761;color:#fff;border-color:#1e2761}
 .tabs{display:flex;gap:6px;overflow-x:auto;padding:12px 20px;border-bottom:1px solid #e9eef7;background:#f8fafc;flex-shrink:0}
 .tab{border:1px solid #cbd5e1;border-radius:9px;padding:9px 14px;background:#fff;color:#475569;font-weight:800;cursor:pointer;white-space:nowrap}
-.tab.active{background:#4f46e5;border-color:#4f46e5;color:#fff}
+.tab.active{background:#1e2761;border-color:#1e2761;color:#fff}
 .status{padding:7px 22px;color:#64748b;font-size:11px;border-bottom:1px solid #e9eef7;flex-shrink:0}
 .frames{flex:1;min-height:0;height:auto;overflow:hidden}
 .board-frame{display:none;width:100%;height:100%;min-height:0;border:0;background:#f7f9fd}
@@ -2328,7 +2368,7 @@ if(aside) aside.style.display = 'none';
 target.style.marginLeft = '0';
 target.style.width = '100%';
 await new Promise(r => setTimeout(r, 60));
-const canvas = await html2canvas(target, { scale: 2, useCORS: true, backgroundColor: '#f8fafc' });
+const canvas = await html2canvas(target, { scale: 2, useCORS: true, backgroundColor: '#f6f8fc' });
 const { jsPDF } = window.jspdf;
 const pdf = new jsPDF('p', 'pt', 'a4');
 const pageWidth = pdf.internal.pageSize.getWidth();
@@ -2427,43 +2467,52 @@ vars.forEach(v => { run += v; min = Math.min(min, run); max = Math.max(max, run)
 const pad = Math.max(50000, Math.ceil((max - min) * 0.1 / 50000) * 50000 || 50000);
 return { min: Math.floor((min - pad) / 50000) * 50000, max: Math.ceil((max + pad) / 50000) * 50000 };
 }
+// PRO theme waterfall: navy totals, green/red steps, readable labels (wrapped to two lines), monospaced amounts.
 function buildWF(canvasId, labels, baseVal, varsArr, endVal, yMin, yMax) {
-var bases=[], bars=[], bgs=[], run=baseVal;
-bases.push(0); bars.push(baseVal); bgs.push('#4f46e5');
+var bases=[], bars=[], bgs=[], lblColors=[], run=baseVal;
+bases.push(0); bars.push(baseVal); bgs.push(PRO.navy); lblColors.push(PRO.ink);
 varsArr.forEach(function(v) {
 bases.push(v < 0 ? run + v : run);
 bars.push(Math.abs(v));
-bgs.push(v < 0 ? '#16a34a' : '#e11d48');
+bgs.push(v < 0 ? PRO.fav : PRO.unfav);
+lblColors.push(v < 0 ? PRO.fav : PRO.unfav);
 run += v;
 });
-bases.push(0); bars.push(endVal); bgs.push('#4f46e5');
+bases.push(0); bars.push(endVal); bgs.push(PRO.navy); lblColors.push(PRO.ink);
+function k(n){ return '$' + Math.round(Math.abs(n) / 1000).toLocaleString('en-US') + 'K'; }
+function wrap(label){
+var t = String(label || ''); if(t.length <= 16) return t;
+var w = t.split(' '), half = Math.ceil(w.length / 2);
+return [w.slice(0, half).join(' '), w.slice(half).join(' ')];
+}
 var canvas = document.getElementById(canvasId); if (!canvas) return;
 destroyChart(canvasId);
 chartRefs[canvasId] = new Chart(canvas, {
 type: 'bar',
 data: {
-labels: labels,
+labels: labels.map(wrap),
 datasets: [
 { data: bases, backgroundColor: 'rgba(0,0,0,0)', borderWidth: 0, datalabels: { display: false } },
-{ data: bars, backgroundColor: bgs, borderWidth: 0, borderRadius: 6,
+{ data: bars, backgroundColor: bgs, borderWidth: 0, borderRadius: 5, maxBarThickness: 96, categoryPercentage: 0.72, barPercentage: 0.9,
 datalabels: {
-display: true, anchor: 'end', align: 'end', offset: 2,
-color: '#334155', font: { size: 13, weight: '700' },
+display: true, anchor: 'end', align: 'end', offset: 4,
+color: function(ctx){ return lblColors[ctx.dataIndex]; },
+font: { family: '"Geist Mono", ui-monospace, Menlo, monospace', size: 14, weight: '600' },
 formatter: function(v, ctx) {
 var i = ctx.dataIndex;
-if (i === 0 || i === bars.length - 1) return '$' + Math.round((bases[i] + v) / 1000) + 'K';
+if (i === 0 || i === bars.length - 1) return k(bases[i] + v);
 var o = varsArr[i - 1];
-return (o > 0 ? '+' : '-') + '$' + Math.round(Math.abs(o) / 1000) + 'K';
+return (o > 0 ? '+' : '−') + k(o);
 }
 }
 }
 ]
 },
 options: {
-responsive: true, maintainAspectRatio: false, layout: { padding: { top: 44 } },
+responsive: true, maintainAspectRatio: false, layout: { padding: { top: 34, left: 4, right: 4 } },
 scales: {
-x: { stacked: true, grid: { display: false }, ticks: { font: { size: 9.5 }, color: '#64748b', autoSkip: false, maxRotation: 20 } },
-y: { stacked: true, min: yMin, max: yMax, grid: { color: '#f1f5f9' }, ticks: { font: { size: 9 }, color: '#64748b', callback: function(v) { return '$' + (v/1000).toFixed(0) + 'K'; } } }
+x: { stacked: true, grid: { display: false }, border: { color: '#e2e6ef' }, ticks: { font: { size: 12, weight: '500' }, color: PRO.muted, autoSkip: false, maxRotation: 0 } },
+y: { stacked: true, min: yMin, max: yMax, border: { display: false }, grid: { color: PRO.grid }, ticks: { font: { size: 10.5 }, color: PRO.faint, maxTicksLimit: 6, callback: function(v) { return '$' + Math.round(v/1000).toLocaleString('en-US') + 'K'; } } }
 },
 plugins: { legend: { display: false }, tooltip: { enabled: false } }
 }
@@ -2481,15 +2530,15 @@ type: 'line',
 data: {
 labels: trend.labels,
 datasets: [
-{ label: 'Working', data: trend.working, borderColor: '#16a34a', backgroundColor: 'rgba(22,163,74,0.14)', fill: true, borderWidth: 3, pointRadius: 4, pointBackgroundColor: '#16a34a', tension: 0.35, datalabels: { display: false } },
-{ label: 'Plan', data: trend.plan, borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,0.10)', fill: true, borderWidth: 2.5, pointRadius: 4, pointBackgroundColor: '#2563eb', borderDash: [6,4], tension: 0.35, datalabels: { display: false } }
+{ label: 'Working', data: trend.working, borderColor: PRO.navy, backgroundColor: 'rgba(30,39,97,0.08)', fill: true, borderWidth: 2.5, pointRadius: 3.5, pointBackgroundColor: '#fff', pointBorderColor: PRO.navy, pointBorderWidth: 2, tension: 0.3, datalabels: { display: false } },
+{ label: 'Plan', data: trend.plan, borderColor: PRO.faint, backgroundColor: 'rgba(0,0,0,0)', fill: false, borderWidth: 2, pointRadius: 0, borderDash: [6,5], tension: 0.3, datalabels: { display: false } }
 ]
 },
 options: {
 responsive: true, maintainAspectRatio: false,
 scales: {
-x: { grid: { display: false }, ticks: { font: { size: 10 }, color: '#64748b' } },
-y: { min, max, grid: { color: '#f1f5f9' }, ticks: { font: { size: 9 }, color: '#64748b', callback: function(v) { return '$' + (v/1000).toFixed(0) + 'K'; } } }
+x: { grid: { display: false }, border: { color: '#e2e6ef' }, ticks: { font: { size: 11.5, weight: '500' }, color: PRO.muted } },
+y: { min, max, border: { display: false }, grid: { color: PRO.grid }, ticks: { font: { size: 10.5 }, color: PRO.faint, maxTicksLimit: 6, callback: function(v) { return '$' + Math.round(v/1000).toLocaleString('en-US') + 'K'; } } }
 },
 plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(c) { return c.dataset.label + ': $' + Math.round(c.raw/1000) + 'K'; } } } }
 }
