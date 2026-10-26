@@ -1706,6 +1706,7 @@ inlineCssIntoClone(clone, cssText);
 appendInteractiveScript(clone);
 appendDrillExportScript(clone);
 appendBotExportScript(clone);
+appendProChartsScript(clone);
 } else {
 clone.querySelectorAll('.hidden, .del-btn, .del-block, .add-act, .mini-btn, .ghost-btn, .topbar-actions, #save-nav, #download-nav, #download-pdf-nav, #back-nav, #home-nav, #drill-overlay, #upload-shell, #fpa-bot-root, #fpa-bot-style').forEach(el => el.remove());
 freezeCanvasesAsImages(clone);
@@ -1714,6 +1715,7 @@ inlineCssIntoClone(clone, cssText);
 appendExportScript(clone);
 appendDrillExportScript(clone);
 appendBotExportScript(clone);
+appendProChartsScript(clone);
 }
 return '<!DOCTYPE html>\n' + clone.outerHTML;
 }
@@ -2451,99 +2453,166 @@ delete chartRefs[id];
 }
 }
 function renderCharts(model){
-// PRO model: charts drawn as SVG at the real container width (1 unit = 1px), so their text
-// matches the tables and stays sharp in the exported HTML. Falls back to Chart.js on any error.
-try{ swapForSvg('trendC', w => proTrendSvg(model.year.trend, w)); }
-catch(e){ console.warn('SVG trend failed, using Chart.js', e); renderTrendChart(model.year.trend); }
+// PRO model: charts are SVG drawn at the real width of their box (1 unit = 1px), so text matches
+// the tables. They redraw on resize, also inside the exported HTML. Falls back to Chart.js on error.
+try{
+const tc = document.getElementById('trendC');
+if(!tc) throw new Error('no trend canvas');
+const twrap = tc.parentNode;
+const tdata = document.createElement('script');
+tdata.type = 'application/json'; tdata.id = 'trendC-data';
+tdata.textContent = JSON.stringify(model.year.trend || {});
+twrap.parentNode.insertBefore(tdata, twrap.nextSibling);
+twrap.setAttribute('data-pro-chart', 'trend'); twrap.setAttribute('data-src', 'trendC-data');
+destroyChart('trendC'); tc.remove();
 ['sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst'].forEach(id => {
-const node = document.getElementById(id + '-wf-data');
-const data = parseEmbeddedJson(node);
+const cv = document.getElementById(id + '-wf');
+if(!cv || !document.getElementById(id + '-wf-data')) return;
+const w = cv.parentNode;
+w.setAttribute('data-pro-chart', 'wf'); w.setAttribute('data-src', id + '-wf-data');
+destroyChart(id + '-wf'); cv.remove();
+});
+proCharts();
+}catch(e){
+console.warn('SVG charts failed, using Chart.js', e);
+renderTrendChart(model.year.trend);
+['sec-qplan','sec-qfcst','sec-fyplan','sec-fyfcst'].forEach(id => {
+const data = parseEmbeddedJson(document.getElementById(id + '-wf-data'));
 if(!data) return;
-try{ swapForSvg(id + '-wf', w => proWaterfallSvg(data, w)); }
-catch(e){
-console.warn('SVG waterfall failed, using Chart.js', e);
 const padded = waterfallBounds(data.baseStart, data.vars, data.workingEnd);
 buildWF(id + '-wf', data.labels, data.baseStart, data.vars, data.workingEnd, padded.min, padded.max);
-}
 });
 }
-function swapForSvg(canvasId, build){
-const canvas = document.getElementById(canvasId);
-if(!canvas) throw new Error('missing ' + canvasId);
-const wrap = canvas.parentNode;
-wrap.classList.add('pro-svg');
-const cs = getComputedStyle(wrap);
-let w = wrap.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
-if(!(w > 300)) w = 1100;
-const svg = build(Math.round(Math.min(w, 2000)));
-if(!svg) throw new Error('empty svg');
-destroyChart(canvasId);
-wrap.innerHTML = svg;
 }
-function proK(v){ const a = Math.abs(v) / 1000; return '$' + (a >= 100 ? Math.round(a).toLocaleString('en-US') : a.toFixed(a >= 10 ? 0 : 1)) + 'K'; }
-function proEsc(t){ return String(t == null ? '' : t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-const PRO_SANS = 'Geist,system-ui,sans-serif', PRO_MONO = 'Geist Mono,ui-monospace,monospace';
-// Waterfall: soft navy totals, muted green/red steps, axis zoomed to where the steps move.
-function proWaterfallSvg(d, W){
-const FAV='#2f8a68', UNFAV='#c8505a', TOT='#34407a', INK='#1e2761', MUTED='#5b6385', LINE='#e2e6ef';
-W = W || 1100;
-const H=250, padL=8, padR=8, top=40, bot=46, n=d.labels.length;
-const steps=[]; let cum=d.baseStart;
+// Self-contained (serialized into the exported HTML): draws every [data-pro-chart] box.
+function proCharts(){
+var SANS = 'Geist,system-ui,sans-serif', MONO = 'Geist Mono,ui-monospace,monospace';
+function K(v){ var a = Math.abs(v) / 1000; return '$' + (a >= 100 ? Math.round(a).toLocaleString('en-US') : a.toFixed(a >= 10 ? 0 : 1)) + 'K'; }
+function E(t){ return String(t == null ? '' : t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function wf(d, W){
+var FAV='#3a8f6e', UNFAV='#c85a62', TOT='#3b4680', INK='#1e2761', MUTED='#5b6385', LINE='#e2e6ef';
+var H=200, padL=6, padR=6, top=30, bot=38, n=d.labels.length, steps=[], cum=d.baseStart;
 steps.push({lab:d.labels[0], a:0, b:d.baseStart, type:'tot', v:d.baseStart});
-d.vars.forEach((v,i) => { steps.push({lab:d.labels[i+1], a:cum, b:cum+v, type:v>0?'unf':'fav', v}); cum+=v; });
+d.vars.forEach(function(v,i){ steps.push({lab:d.labels[i+1], a:cum, b:cum+v, type:v>0?'unf':'fav', v:v}); cum+=v; });
 steps.push({lab:d.labels[n-1], a:0, b:d.workingEnd, type:'tot', v:d.workingEnd});
-const vals=[]; steps.forEach(st => { if(st.type!=='tot') vals.push(st.a, st.b); else vals.push(st.b); });
-const pos=vals.filter(x => x > 0); if(!pos.length) throw new Error('no data');
-const mx=Math.max(...pos), mn=Math.min(...pos);
-const span=Math.max(mx-mn, mx*0.02), lo=Math.max(0, mn-span*1.6), hi=mx+span*0.25;
-const y=v => top+(H-top-bot)*(1-(v-lo)/(hi-lo));
-const cw=(W-padL-padR)/n, bw=Math.min(72, cw*0.46), out=[];
-out.push(`<line x1="${padL}" x2="${W-padR}" y1="${H-bot}" y2="${H-bot}" stroke="${LINE}"/>`);
-steps.forEach((st,i) => {
-const x=padL+cw*i+(cw-bw)/2; let y1=y(Math.max(st.a,st.b)), y2=st.type==='tot'?H-bot:y(Math.min(st.a,st.b));
+var vals=[]; steps.forEach(function(st){ if(st.type!=='tot'){ vals.push(st.a, st.b); } else vals.push(st.b); });
+var pos=vals.filter(function(x){ return x > 0; }); if(!pos.length) return '';
+var mx=Math.max.apply(null,pos), mn=Math.min.apply(null,pos);
+var span=Math.max(mx-mn, mx*0.02), lo=Math.max(0, mn-span*1.6), hi=mx+span*0.25;
+function y(v){ return top+(H-top-bot)*(1-(v-lo)/(hi-lo)); }
+var cw=(W-padL-padR)/n, bw=Math.min(52, cw*0.4), out=[];
+out.push('<line x1="'+padL+'" x2="'+(W-padR)+'" y1="'+(H-bot)+'" y2="'+(H-bot)+'" stroke="'+LINE+'"/>');
+steps.forEach(function(st,i){
+var x=padL+cw*i+(cw-bw)/2, y1=y(Math.max(st.a,st.b)), y2=st.type==='tot'?H-bot:y(Math.min(st.a,st.b));
 if(y2-y1<2) y2=y1+2;
-const c=st.type==='tot'?TOT:(st.type==='fav'?FAV:UNFAV);
-out.push(`<rect x="${x}" y="${y1}" width="${bw}" height="${y2-y1}" rx="4" fill="${c}" fill-opacity="${st.type==='tot'?'.92':'.82'}"/>`);
-if(i<steps.length-1){ const nx=padL+cw*(i+1)+(cw-bw)/2; out.push(`<line x1="${x+bw}" x2="${nx}" y1="${y(st.b)}" y2="${y(st.b)}" stroke="#c3c9db" stroke-dasharray="3 3"/>`); }
-const lab=st.type==='tot'?proK(st.v):(st.v>0?'+':'−')+proK(st.v);
-out.push(`<text x="${x+bw/2}" y="${y1-8}" text-anchor="middle" font-size="12.5" font-weight="600" fill="${st.type==='tot'?INK:c}" font-family="${PRO_MONO}">${lab}</text>`);
-const name=String(st.lab), words=name.split(' '); let l1=name, l2='';
-if(name.length*6.6>cw-8 && words.length>1){ const half=Math.ceil(words.length/2); l1=words.slice(0,half).join(' '); l2=words.slice(half).join(' '); }
-out.push(`<text x="${x+bw/2}" y="${H-bot+18}" text-anchor="middle" font-size="12" fill="${MUTED}" font-family="${PRO_SANS}">${proEsc(l1)}</text>`);
-if(l2) out.push(`<text x="${x+bw/2}" y="${H-bot+33}" text-anchor="middle" font-size="12" fill="${MUTED}" font-family="${PRO_SANS}">${proEsc(l2)}</text>`);
+var c=st.type==='tot'?TOT:(st.type==='fav'?FAV:UNFAV);
+out.push('<rect x="'+x+'" y="'+y1+'" width="'+bw+'" height="'+(y2-y1)+'" rx="3" fill="'+c+'" fill-opacity="'+(st.type==='tot'?'.9':'.8')+'"/>');
+if(i<steps.length-1){ var nx=padL+cw*(i+1)+(cw-bw)/2; out.push('<line x1="'+(x+bw)+'" x2="'+nx+'" y1="'+y(st.b)+'" y2="'+y(st.b)+'" stroke="#c9cfdf" stroke-dasharray="3 3"/>'); }
+var lab=st.type==='tot'?K(st.v):(st.v>0?'+':'−')+K(st.v);
+out.push('<text x="'+(x+bw/2)+'" y="'+(y1-7)+'" text-anchor="middle" font-size="11.5" font-weight="600" fill="'+(st.type==='tot'?INK:c)+'" font-family="'+MONO+'">'+lab+'</text>');
+var name=String(st.lab), words=name.split(' '), l1=name, l2='';
+if(name.length*6.2>cw-8 && words.length>1){ var half=Math.ceil(words.length/2); l1=words.slice(0,half).join(' '); l2=words.slice(half).join(' '); }
+out.push('<text x="'+(x+bw/2)+'" y="'+(H-bot+16)+'" text-anchor="middle" font-size="11.5" fill="'+MUTED+'" font-family="'+SANS+'">'+E(l1)+'</text>');
+if(l2) out.push('<text x="'+(x+bw/2)+'" y="'+(H-bot+30)+'" text-anchor="middle" font-size="11.5" fill="'+MUTED+'" font-family="'+SANS+'">'+E(l2)+'</text>');
 });
-if(lo>0) out.push(`<text x="${padL}" y="12" font-size="11" fill="#8a92b0" font-family="${PRO_SANS}">Axis starts at ${proK(lo)} to show the variances</text>`);
-return `<svg class="pro-wf" viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Waterfall">${out.join('')}</svg>`;
+if(lo>0) out.push('<text x="'+padL+'" y="11" font-size="10.5" fill="#8a92b0" font-family="'+SANS+'">Axis starts at '+K(lo)+' to show the variances</text>');
+return '<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" role="img" aria-label="Waterfall">'+out.join('')+'</svg>';
 }
-// Trend: Working (green, soft fill) vs Plan (blue, dashed), one point per elapsed month.
-function proTrendSvg(t, W){
-const WORK='#2f8a68', PLANC='#4f74c9', GRID='#eef0f6', MUTED='#5b6385', FAINT='#8a92b0';
-W = W || 1100;
-const H=200, padL=56, padR=14, top=10, bot=26, labels=t.labels||[], n=labels.length;
-if(!n) throw new Error('no trend');
-const all=[...(t.working||[]), ...(t.plan||[])].filter(Number.isFinite);
-if(!all.length) throw new Error('no trend data');
-const rawLo=Math.min(...all), rawHi=Math.max(...all), rng=Math.max(rawHi-rawLo, rawHi*0.05);
-const nice=[10000,25000,50000,100000,250000,500000,1000000,2500000,5000000];
-const step=nice.find(s => rng/s <= 5) || 10000000;
-const lo=Math.max(0, Math.floor((rawLo-rng*0.15)/step)*step), hi=Math.ceil((rawHi+rng*0.1)/step)*step;
-const x=i => n===1 ? (padL+W-padR)/2 : padL+12+(W-padL-padR-24)*i/(n-1);
-const y=v => top+(H-top-bot)*(1-(v-lo)/(hi-lo));
-const out=[];
-for(let v=lo; v<=hi+1; v+=step){ out.push(`<line x1="${padL}" x2="${W-padR}" y1="${y(v)}" y2="${y(v)}" stroke="${GRID}"/><text x="${padL-10}" y="${y(v)+4}" text-anchor="end" font-size="11" fill="${FAINT}" font-family="${PRO_SANS}">${proK(v)}</text>`); }
-labels.forEach((l,i) => out.push(`<text x="${x(i)}" y="${H-6}" text-anchor="middle" font-size="11.5" fill="${MUTED}" font-family="${PRO_SANS}">${proEsc(l)}</text>`));
-function pts(arr){ return arr.map((v,i) => Number.isFinite(v) ? [x(i), y(v)] : null).filter(Boolean); }
-function curve(p){ if(!p.length) return ''; let dd=`M${p[0][0]},${p[0][1]}`; for(let i=0;i<p.length-1;i++){ const p0=p[i-1]||p[i], p1=p[i], p2=p[i+1], p3=p[i+2]||p2; const k=0.12; dd+=` C${p1[0]+(p2[0]-p0[0])*k},${p1[1]+(p2[1]-p0[1])*k} ${p2[0]-(p3[0]-p1[0])*k},${p2[1]-(p3[1]-p1[1])*k} ${p2[0]},${p2[1]}`; } return dd; }
+function trend(t, W){
+var WORK='#3a8f6e', PLANC='#5577c4', GRID='#eef0f6', MUTED='#5b6385', FAINT='#8a92b0';
+var H=170, padL=52, padR=12, top=8, bot=24, labels=t.labels||[], n=labels.length;
+if(!n) return '';
+var all=(t.working||[]).concat(t.plan||[]).filter(function(v){ return isFinite(v) && v !== null; });
+if(!all.length) return '';
+var rawLo=Math.min.apply(null,all), rawHi=Math.max.apply(null,all), rng=Math.max(rawHi-rawLo, rawHi*0.05);
+var nice=[10000,25000,50000,100000,250000,500000,1000000,2500000,5000000], step=10000000;
+for(var i=0;i<nice.length;i++){ if(rng/nice[i] <= 4){ step=nice[i]; break; } }
+var lo=Math.max(0, Math.floor((rawLo-rng*0.15)/step)*step), hi=Math.ceil((rawHi+rng*0.1)/step)*step;
+function x(i){ return n===1 ? (padL+W-padR)/2 : padL+12+(W-padL-padR-24)*i/(n-1); }
+function y(v){ return top+(H-top-bot)*(1-(v-lo)/(hi-lo)); }
+var out=[];
+for(var v=lo; v<=hi+1; v+=step){ out.push('<line x1="'+padL+'" x2="'+(W-padR)+'" y1="'+y(v)+'" y2="'+y(v)+'" stroke="'+GRID+'"/><text x="'+(padL-8)+'" y="'+(y(v)+3.5)+'" text-anchor="end" font-size="10.5" fill="'+FAINT+'" font-family="'+SANS+'">'+K(v)+'</text>'); }
+labels.forEach(function(l,i){ out.push('<text x="'+x(i)+'" y="'+(H-5)+'" text-anchor="middle" font-size="11" fill="'+MUTED+'" font-family="'+SANS+'">'+E(l)+'</text>'); });
+function pts(arr){ var r=[]; arr.forEach(function(v,i){ if(isFinite(v) && v !== null) r.push([x(i), y(v), i]); }); return r; }
+function curve(p){ var dd='M'+p[0][0]+','+p[0][1]; for(var i=0;i<p.length-1;i++){ var p0=p[i-1]||p[i], p1=p[i], p2=p[i+1], p3=p[i+2]||p2, k=0.12; dd+=' C'+(p1[0]+(p2[0]-p0[0])*k)+','+(p1[1]+(p2[1]-p0[1])*k)+' '+(p2[0]-(p3[0]-p1[0])*k)+','+(p2[1]-(p3[1]-p1[1])*k)+' '+p2[0]+','+p2[1]; } return dd; }
 function series(arr, color, fill, dash){
-const p=pts(arr||[]); if(!p.length) return;
-const c=curve(p), base=H-bot;
-out.push(`<path d="${c} L${p[p.length-1][0]},${base} L${p[0][0]},${base} Z" fill="${color}" fill-opacity="${fill}"/>`);
-out.push(`<path d="${c}" fill="none" stroke="${color}" stroke-width="2"${dash?' stroke-dasharray="5 4"':''} stroke-linecap="round"/>`);
-p.forEach(q => out.push(`<circle cx="${q[0]}" cy="${q[1]}" r="3" fill="#fff" stroke="${color}" stroke-width="1.75"/>`));
+var p=pts(arr||[]); if(!p.length) return;
+var c=curve(p), base=H-bot;
+out.push('<path d="'+c+' L'+p[p.length-1][0]+','+base+' L'+p[0][0]+','+base+' Z" fill="'+color+'" fill-opacity="'+fill+'"/>');
+out.push('<path d="'+c+'" fill="none" stroke="'+color+'" stroke-width="1.75"'+(dash?' stroke-dasharray="5 4"':'')+' stroke-linecap="round"/>');
+p.forEach(function(q){ out.push('<circle class="pc-pt" data-i="'+q[2]+'" cx="'+q[0]+'" cy="'+q[1]+'" r="2.6" fill="#fff" stroke="'+color+'" stroke-width="1.5"/>'); });
 }
 series(t.plan, PLANC, 0.05, true);
-series(t.working, WORK, 0.09, false);
-return `<svg class="pro-trend" viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Trend">${out.join('')}</svg>`;
+series(t.working, WORK, 0.08, false);
+out.splice(0, 0, '<line class="pc-guide" x1="0" x2="0" y1="'+top+'" y2="'+(H-bot)+'" stroke="#c3c9db" stroke-dasharray="3 3" opacity="0"/>');
+var cell = n > 1 ? (x(1) - x(0)) : (W - padL - padR);
+labels.forEach(function(l,i){ out.push('<rect class="pc-hit" data-i="'+i+'" data-x="'+x(i)+'" x="'+(x(i)-cell/2)+'" y="0" width="'+cell+'" height="'+H+'" fill="transparent" style="cursor:crosshair"/>'); });
+return '<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" role="img" aria-label="Trend">'+out.join('')+'</svg>';
+}
+// Trend tooltip: month, Working, Plan and the variance (as the Chart.js version showed on hover).
+function hover(box, t){
+var svg = box.querySelector('svg'); if(!svg) return;
+box.__pcHover = true;
+box.querySelectorAll('.pc-tip').forEach(function(o){ o.remove(); });
+box.style.position = 'relative';
+var tip = document.createElement('div');
+tip.className = 'pc-tip';
+tip.style.cssText = 'position:absolute;pointer-events:none;opacity:0;transition:opacity .12s;z-index:5;background:#0f1530;color:#fff;border-radius:8px;padding:8px 10px;font:12px/1.45 Geist,system-ui,sans-serif;box-shadow:0 8px 20px -6px rgba(15,21,48,.45);white-space:nowrap';
+box.appendChild(tip);
+var guide = svg.querySelector('.pc-guide');
+function row(c, l, v){ return '<div style="display:flex;align-items:center;gap:8px"><span style="width:8px;height:8px;border-radius:50%;background:'+c+'"></span><span style="color:#b9c0dc">'+l+'</span><span style="margin-left:auto;padding-left:14px;font-family:Geist Mono,ui-monospace,monospace">'+v+'</span></div>'; }
+function show(i, cx){
+var wv = (t.working||[])[i], pv = (t.plan||[])[i];
+var h = '<div style="font-weight:600;margin-bottom:3px">'+E((t.labels||[])[i])+'</div>';
+if(isFinite(wv) && wv !== null) h += row('#6fc39f', 'Working', K(wv));
+if(isFinite(pv) && pv !== null) h += row('#8fa8e6', 'Plan', K(pv));
+if(isFinite(wv) && wv !== null && isFinite(pv) && pv !== null){ var d = wv - pv; h += '<div style="margin-top:4px;padding-top:4px;border-top:1px solid rgba(255,255,255,.15);display:flex"><span style="color:#b9c0dc">vs Plan</span><span style="margin-left:auto;padding-left:14px;font-family:Geist Mono,ui-monospace,monospace;font-weight:600;color:'+(Math.abs(d) < 500 ? '#fff' : d < 0 ? '#7ee0b0' : '#ff9aa2')+'">'+(Math.abs(d) < 500 ? '$0K' : (d > 0 ? '+' : '\u2212')+K(d))+'</span></div>'; }
+tip.innerHTML = h;
+var bw = box.clientWidth, sx = svg.getBoundingClientRect().left - box.getBoundingClientRect().left;
+var left = sx + cx + 14; tip.style.opacity = '1';
+if(left + tip.offsetWidth > bw - 4) left = sx + cx - tip.offsetWidth - 14;
+tip.style.left = left + 'px'; tip.style.top = '10px';
+if(guide){ guide.setAttribute('x1', cx); guide.setAttribute('x2', cx); guide.setAttribute('opacity', '1'); }
+svg.querySelectorAll('.pc-pt').forEach(function(c){ c.setAttribute('r', c.getAttribute('data-i') === String(i) ? '4.2' : '2.6'); });
+}
+function hide(){ tip.style.opacity = '0'; if(guide) guide.setAttribute('opacity', '0'); svg.querySelectorAll('.pc-pt').forEach(function(c){ c.setAttribute('r', '2.6'); }); }
+svg.querySelectorAll('.pc-hit').forEach(function(r){
+r.addEventListener('mouseenter', function(){ show(+r.getAttribute('data-i'), +r.getAttribute('data-x')); });
+});
+svg.addEventListener('mouseleave', hide);
+}
+function draw(){
+document.querySelectorAll('[data-pro-chart]').forEach(function(box){
+try{
+var src = document.getElementById(box.getAttribute('data-src')); if(!src) return;
+var data = JSON.parse(src.textContent || '{}');
+var cs = getComputedStyle(box);
+var w = box.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+if(!(w > 200)) return;
+w = Math.round(w);
+if(box.getAttribute('data-w') === String(w) && box.querySelector('svg')){ if(box.getAttribute('data-pro-chart') === 'trend' && !box.__pcHover) hover(box, data); return; }
+var svg = box.getAttribute('data-pro-chart') === 'trend' ? trend(data, w) : wf(data, w);
+if(svg){ box.innerHTML = svg; box.setAttribute('data-w', String(w)); box.classList.add('pro-svg'); if(box.getAttribute('data-pro-chart') === 'trend') hover(box, data); }
+}catch(e){ if(window.console) console.warn('Chart draw failed', e); }
+});
+}
+draw();
+if(window.requestAnimationFrame) requestAnimationFrame(function(){ requestAnimationFrame(draw); });
+if(!window.__proChartsResize){
+var tm = null;
+window.__proChartsResize = function(){ clearTimeout(tm); tm = setTimeout(draw, 120); };
+window.addEventListener('resize', window.__proChartsResize);
+}
+window.__proChartsDraw = draw;
+}
+function appendProChartsScript(clone){
+try{
+if(!clone.querySelector('[data-pro-chart]')) return;
+const script = document.createElement('script');
+script.textContent = '(' + proCharts.toString() + ')();';
+const body = clone.querySelector('body');
+if(body) body.appendChild(script);
+}catch(e){ console.warn('Could not embed the PRO charts script into export.', e); }
 }
 function waterfallBounds(base, vars, end){
 let run = base;
