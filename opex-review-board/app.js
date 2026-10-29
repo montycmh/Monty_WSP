@@ -883,24 +883,27 @@ function renderWarnings(warnings) {
 }
 
 /* ---------- tables: frozen left (Category, Vendor, GL), scrolling months, frozen right ---------- */
-const COLS = { cat: 150, vendor: 180, gl: 210, month: 96, tag: 104, comment: 170, reclass: 190, check: 60 };
+const COLS = { vendor: 190, gl: 250, month: 96, tag: 104, comment: 170, reclass: 190, check: 60 };
+const VISIBLE_MONTHS = 3;
 
 function renderHeaders(priorMonths, lastMonth, targetId, prefix) {
   const isNew = prefix === 'new';
   const months = [...priorMonths, lastMonth];
   const right = isNew ? ['tag', 'comment', 'reclass', 'check'] : ['tag', 'comment', 'check'];
   $(`${prefix}-colgroup`).innerHTML =
-    `<col style="width:${COLS.cat}px"><col style="width:${COLS.vendor}px"><col style="width:${COLS.gl}px">` +
+    `<col style="width:${COLS.vendor}px"><col style="width:${COLS.gl}px">` +
     months.map(() => `<col style="width:${COLS.month}px">`).join('') +
     right.map(key => `<col style="width:${COLS[key]}px">`).join('');
   const table = $(targetId).closest('table');
-  table.style.minWidth = '100%';
-  table.style.width = `${COLS.cat + COLS.vendor + COLS.gl + months.length * COLS.month + right.reduce((sum, key) => sum + COLS[key], 0)}px`;
+  const fixed = COLS.vendor + COLS.gl + right.reduce((sum, key) => sum + COLS[key], 0);
+  table.style.width = `${fixed + months.length * COLS.month}px`;
+  table.style.minWidth = isNew ? '' : '100%';
+  // Reclass Review only takes the width of 3 months; the rest of the row goes to Transaction History.
+  if (isNew) document.querySelector('.review-grid').style.setProperty('--review-max', `${fixed + Math.min(months.length, VISIBLE_MONTHS) * COLS.month + 2}px`);
   const rightOffsets = stickyRightOffsets(right);
   $(targetId).innerHTML = `
-    <th class="fz-l" style="left:0">Category</th>
-    <th class="fz-l" style="left:${COLS.cat}px">Vendor</th>
-    <th class="fz-l fz-edge-l" style="left:${COLS.cat + COLS.vendor}px">GL Account</th>
+    <th class="fz-l" style="left:0">Vendor</th>
+    <th class="fz-l fz-edge-l" style="left:${COLS.vendor}px">GL Account · Category</th>
     ${priorMonths.map(mon => `<th class="month">${escapeHtml(mon)}</th>`).join('')}
     <th class="month is-review">${escapeHtml(lastMonth)}</th>
     <th class="fz-r fz-edge-r" style="right:${rightOffsets.tag}px">Tag</th>
@@ -975,9 +978,8 @@ function renderRows(targetId, rows, priorMonths, lastMonth, board) {
         data-vendor-full="${escapeHtml(row.vendorFull)}"
         data-prev-amount="${escapeHtml(row.nearestPriorAmount === null || row.nearestPriorAmount === undefined ? '' : String(row.nearestPriorAmount))}"
       >
-        <td class="fz-l" style="left:0"><div class="category-cell"><span class="category-icon">${iconForCategory(row.source.L2)}</span><span>${escapeHtml(String(row.source.L2 ?? '—').replace(/^Total\s+/i, ''))}</span></div></td>
-        <td class="fz-l" style="left:${COLS.cat}px">${vendorBlock(row.source.Vendor)}</td>
-        <td class="fz-l fz-edge-l mono gl-cell" style="left:${COLS.cat + COLS.vendor}px">${escapeHtml(String(row.source.GL ?? '—'))}</td>
+        <td class="fz-l" style="left:0">${vendorBlock(row.source.Vendor)}</td>
+        <td class="fz-l fz-edge-l gl-cell" style="left:${COLS.vendor}px"><div class="gl-main mono">${escapeHtml(String(row.source.GL ?? '—'))}</div><div class="gl-cat"><span class="category-icon">${iconForCategory(row.source.L2)}</span>${escapeHtml(String(row.source.L2 ?? '—').replace(/^Total\s+/i, ''))}</div></td>
         ${priorCells}
         <td class="numeric month is-review">${escapeHtml(currency(row.lastValue))}</td>
         <td class="fz-r fz-edge-r" style="right:${ro.tag}px">${tagPill(row.tag)}</td>
@@ -1099,7 +1101,8 @@ function updateSelectionUi() {
 function renderFilePreview() {
   const board = activeBoard();
   if (!board) return;
-  const reclass = buildReclassExportRows(board, false);
+  const items = buildReclassExportItems(board, false);
+  const reclass = items.map(item => item.payload);
   const missing = buildMissingExportRows(board, false);
   const pending = pendingRows(board);
   let consolidated = 0;
@@ -1115,17 +1118,29 @@ function renderFilePreview() {
   $('file-subtitle').textContent = `${board.name} · ${board.lastMon}. Live preview — it updates as you select rows and assign Department and GL.`;
 
   $('fp-reclass-empty').hidden = reclass.length > 0;
+  const SRC_COLS = ['Name (GL-style)', 'Department: Name', 'Description', 'Memo', 'Entity', 'Transaction Type', 'Document Number', 'Date', 'Amount', 'Date Created'];
+  const cell = (key, value) => {
+    const text = value === null || value === undefined ? '' : String(value);
+    if (key === 'Amount') return `<td class="num mono">${escapeHtml(text === '' ? '' : currency2(value))}</td>`;
+    const cls = ['Name (GL-style)', 'Document Number', 'Date', 'Date Created'].includes(key) ? 'mono' : '';
+    const wide = ['Name (GL-style)', 'Description', 'Memo'].includes(key) ? ' wide' : '';
+    return `<td class="${cls}${wide}" title="${escapeHtml(text)}">${escapeHtml(text) || '<span class="blank">—</span>'}</td>`;
+  };
   $('fp-reclass').innerHTML = reclass.length ? `
-    <thead><tr><th>Entity</th><th>Document</th><th>Date</th><th class="num">Amount</th><th>From GL</th><th>To department</th><th>To GL</th></tr></thead>
-    <tbody>${reclass.map(r => `<tr>
-      <td>${escapeHtml(r['Entity'] || '—')}</td>
-      <td class="mono">${escapeHtml(r['Document Number'] || '—')}</td>
-      <td class="mono">${escapeHtml(r['Date'] || '')}</td>
-      <td class="num mono">${escapeHtml(currency2(r['Amount']))}</td>
-      <td class="mono" title="${escapeHtml(r['Name (GL-style)'])}">${escapeHtml(glLeaf(r['Name (GL-style)']))}</td>
-      <td><b>${escapeHtml(r['Reclass to Business Units'])}</b></td>
-      <td class="mono" title="${escapeHtml(r['Reclass to GL account'])}"><b>${escapeHtml(glLeaf(r['Reclass to GL account']) || r['Reclass to GL account'])}</b></td>
-    </tr>`).join('')}</tbody>` : '';
+    <thead>
+      <tr class="grp"><th rowspan="2" class="match-col">Match <small>preview only</small></th><th colspan="${SRC_COLS.length}" class="g-src">From GL Transaction Summary</th><th class="g-file">File</th><th colspan="2" class="g-to">Reclass to</th></tr>
+      <tr>${SRC_COLS.map(key => `<th class="${key === 'Amount' ? 'num' : ''}">${escapeHtml(key)}</th>`).join('')}<th>Data Source</th><th class="g-to-col">Reclass to Business Units</th><th class="g-to-col">Reclass to GL account</th></tr>
+    </thead>
+    <tbody>${items.map(item => {
+      const r = item.payload;
+      return `<tr>
+        <td class="match-col"><span class="match match-${item.match.level}">${escapeHtml(item.match.text)}</span><small>${escapeHtml(item.row.vname || 'No Vendor')} · ${escapeHtml(board.lastMon)} ${escapeHtml(currency2(item.row.lastValue))}</small></td>
+        ${SRC_COLS.map(key => cell(key, r[key])).join('')}
+        ${cell('Data Source', r['Data Source'])}
+        <td class="to-col"><b>${escapeHtml(r['Reclass to Business Units'])}</b></td>
+        <td class="to-col mono" title="${escapeHtml(r['Reclass to GL account'])}"><b>${escapeHtml(r['Reclass to GL account'])}</b></td>
+      </tr>`;
+    }).join('')}</tbody>` : '';
   $('fp-missing-empty').hidden = missing.length > 0;
   $('fp-missing').innerHTML = missing.length ? `
     <thead><tr><th>Vendor</th><th class="num">Amount TCV</th><th>GL Account</th><th>Class</th></tr></thead>
@@ -1354,6 +1369,26 @@ function resolveExportSource(exportRows, boardRow) {
 }
 
 function buildReclassExportRows(board, includeBoard) {
+  return buildReclassExportItems(board, includeBoard).map(item => item.payload);
+}
+
+// How the exported GL line was found (preview only; the file is not affected).
+function matchInfo(source, boardRow) {
+  const month = Number(boardRow.lastMonthNum || 0);
+  const year = Number(boardRow.lastYear || 0);
+  const sameMonth = Number(source._month_num || 0) === month && Number(source._year || 0) === year;
+  const sameAmount = amountEq(source._amount_num, Number(fmtAmount(boardRow.lastValue)));
+  const fullGl = String(boardRow.fullGl || '').trim();
+  const gl = String(source['Name (GL-style)'] || '').trim();
+  const sameGl = gl === fullGl;
+  const sameLeaf = glLeaf(gl) === glLeaf(fullGl);
+  if (sameMonth && sameAmount && (sameGl || sameLeaf)) return { level: 'ok', text: 'Month · amount · GL' };
+  if (sameMonth && sameAmount) return { level: 'warn', text: 'Month · amount — GL differs' };
+  if (sameMonth && sameLeaf) return { level: 'warn', text: 'Month · GL — amount differs' };
+  return { level: 'warn', text: 'Amount · GL — other month' };
+}
+
+function buildReclassExportItems(board, includeBoard) {
   return board.rows.newRows
     .filter(row => board.selected.has(row.id) && row.recommendation.dept && row.recommendation.gl)
     .flatMap(row => {
@@ -1369,7 +1404,7 @@ function buildReclassExportRows(board, includeBoard) {
               'Reclass to Business Units': row.recommendation.dept,
               'Reclass to GL account': row.recommendation.gl
             });
-            return payload;
+            return { payload, row, match: { level: 'line', text: `GL line · account ${acct.acct}` } };
           });
       }
       const lookup = row.vid ? board.glData[row.vid] : null;
@@ -1393,7 +1428,7 @@ function buildReclassExportRows(board, includeBoard) {
         'Reclass to Business Units': row.recommendation.dept,
         'Reclass to GL account': row.recommendation.gl
       });
-      return [payload];
+      return [{ payload, row, match: matchInfo(source, row) }];
     });
 }
 
