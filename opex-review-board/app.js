@@ -491,6 +491,165 @@ function parseGl(workbook) {
   return rows;
 }
 
+/* ---- Lean GL reader (NetSuite SpreadsheetML .xls) ----
+   The NetSuite "GL Transaction Summary" export is a 100+ MB XML spreadsheet.
+   Loading it whole with SheetJS can exhaust the tab's memory ("Aw, Snap!").
+   This reads the file in pieces and builds exactly the same row objects as
+   parseGl(readWorkbook(file)): header row 7, data from row 8, same values
+   (text, numbers, local-time dates), empty cells as null. */
+const GL_CHUNK_BYTES = 8 * 1024 * 1024;
+const GL_XML_ENTITIES = { '&quot;': '"', '&apos;': "'", '&gt;': '>', '&lt;': '<', '&amp;': '&' };
+
+async function isSpreadsheetXml(file) {
+  const head = await file.slice(0, 4096).text();
+  return /^\s*(?:﻿)?<\?xml/.test(head) && head.includes('urn:schemas-microsoft-com:office:spreadsheet');
+}
+
+function glXmlText(raw) {
+  let s = raw.indexOf('&') === -1 ? raw : raw.replace(/&(?:quot|apos|gt|lt|amp|#x?([\da-fA-F]+));/ig,
+    (m, code) => GL_XML_ENTITIES[m] || String.fromCharCode(parseInt(code, m.indexOf('x') > -1 ? 16 : 10)) || m);
+  if (s.indexOf('_x') > -1) s = s.replace(/_x([\da-fA-F]{4})_/ig, (m, c) => String.fromCharCode(parseInt(c, 16)));
+  return s;
+}
+
+function glXmlDate(raw) {
+  const m = String(raw).match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?)?/);
+  if (!m) return glXmlText(raw);
+  const ms = m[7] ? Math.round(Number('0.' + m[7]) * 1000) : 0;
+  return new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0), ms);
+}
+
+async function readGlRowsLean(file, onProgress) {
+  const decoder = new TextDecoder('utf-8');
+  const cellRe = /<Cell\b([^>]*?)(?:\/>|>([\s\S]*?)<\/Cell>)/g;
+  const dataRe = /<(?:ss:)?Data\b[^>]*?ss:Type="(\w+)"[^>]*>([\s\S]*?)<\/(?:ss:)?Data>/;
+  const pool = new Map(); // one copy per repeated value (departments, accounts, types...)
+  const keep = s => {
+    if (s.length > 200) return JSON.parse(JSON.stringify(s));
+    let v = pool.get(s);
+    if (v === undefined) { v = JSON.parse(JSON.stringify(s)); pool.set(v, v); }
+    return v;
+  };
+  const merged = new Map(); // "r:c" -> value of a merged range's top-left cell
+  let headers = null;
+  const rows = [];
+  let rowNum = 0;
+  let carry = '';
+  let started = false;
+  let done = false;
+
+  function cellValue(attrs, inner) {
+    if (!inner) return null;
+    const d = inner.match(dataRe);
+    if (!d) return null;
+    const type = d[1];
+    const raw = d[2];
+    if (type === 'Number') return +raw;
+    if (type === 'DateTime') return glXmlDate(raw);
+    if (type === 'Boolean') return raw === '1' || /^true$/i.test(raw);
+    const text = glXmlText(raw.indexOf('<') > -1 ? raw.replace(/<.*?>/g, '') : raw);
+    return text === '' ? null : keep(text);
+  }
+
+  function handleRow(rowXml) {
+    const open = rowXml.match(/^<Row\b([^>]*)>/);
+    const idx = open && open[1].match(/ss:Index="(\d+)"/);
+    rowNum = idx ? Number(idx[1]) : rowNum + 1;
+    const r = rowNum;
+    const values = [];
+    let c = 0;
+    cellRe.lastIndex = 0;
+    let m;
+    while ((m = cellRe.exec(rowXml))) {
+      const attrs = m[1];
+      const ci = attrs.match(/ss:Index="(\d+)"/);
+      c = ci ? Number(ci[1]) : c + 1;
+      const value = cellValue(attrs, m[2]);
+      values[c] = value;
+      const across = Number((attrs.match(/ss:MergeAcross="(\d+)"/) || [])[1] || 0);
+      const down = Number((attrs.match(/ss:MergeDown="(\d+)"/) || [])[1] || 0);
+      if (across || down) {
+        for (let rr = r; rr <= r + down; rr += 1) {
+          for (let cc = c; cc <= c + across; cc += 1) {
+            if (rr !== r || cc !== c) merged.set(`${rr}:${cc}`, value);
+          }
+        }
+      }
+      c += across;
+    }
+    const get = col => {
+      const v = values[col];
+      if (v !== null && v !== undefined && v !== '') return v;
+      const key = `${r}:${col}`;
+      return merged.has(key) ? merged.get(key) : null;
+    };
+    if (r === 7) {
+      headers = [];
+      const maxC = Math.max(values.length - 1, 0);
+      for (let col = 1; col <= maxC; col += 1) headers[col] = get(col);
+      return;
+    }
+    if (r < 8 || !headers) return;
+    const row = {};
+    let hasAny = false;
+    for (let col = 1; col < headers.length; col += 1) {
+      const header = headers[col];
+      if (!header) continue;
+      const v = get(col);
+      if (v !== null && v !== undefined && v !== '') hasAny = true;
+      row[String(header)] = v;
+    }
+    if (hasAny) rows.push(row);
+    if (merged.size) for (const key of merged.keys()) if (Number(key.split(':')[0]) <= r) merged.delete(key);
+  }
+
+  function consume(text, final) {
+    let buf = carry + text;
+    if (!started) {
+      const t = buf.indexOf('<Table');
+      if (t === -1) { carry = buf.slice(-64); return; }
+      buf = buf.slice(t);
+      started = true;
+    }
+    let pos = 0;
+    const endTable = buf.indexOf('</Table>');
+    while (!done) {
+      const start = buf.indexOf('<Row', pos);
+      if (endTable !== -1 && (start === -1 || endTable < start)) { done = true; break; }
+      if (start === -1) { pos = buf.length; break; }
+      const gt = buf.indexOf('>', start);
+      if (gt === -1) { pos = start; break; }
+      if (buf.charCodeAt(gt - 1) === 47 /* "/" -> empty <Row/> */) {
+        const idx = buf.slice(start, gt).match(/ss:Index="(\d+)"/);
+        rowNum = idx ? Number(idx[1]) : rowNum + 1;
+        pos = gt + 1;
+        continue;
+      }
+      const end = buf.indexOf('</Row>', start);
+      if (end === -1) { pos = start; break; }
+      handleRow(buf.slice(start, end));
+      pos = end + 6;
+    }
+    carry = done ? '' : buf.slice(pos);
+    if (final && carry && !done) carry = '';
+  }
+
+  for (let offset = 0; offset < file.size && !done; offset += GL_CHUNK_BYTES) {
+    const bytes = await file.slice(offset, offset + GL_CHUNK_BYTES).arrayBuffer();
+    consume(decoder.decode(new Uint8Array(bytes), { stream: true }), false);
+    if (onProgress) onProgress(Math.min(1, (offset + GL_CHUNK_BYTES) / file.size), rows.length);
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  if (!done) consume(decoder.decode(), true);
+  if (!headers) throw new Error('The GL file does not have the expected header row (row 7).');
+  return rows;
+}
+
+async function readGlRows(file, onProgress) {
+  if (await isSpreadsheetXml(file)) return readGlRowsLean(file, onProgress);
+  return parseGl(await readWorkbook(file));
+}
+
 function exportRowPayload(row) {
   return {
     'Name (GL-style)': row['Name (GL-style)'] == null ? '' : String(row['Name (GL-style)']),
@@ -778,8 +937,9 @@ async function buildBoards() {
   $('build-board').disabled = true;
   setBuildStatus('Reading GL Transaction Summary... (large files can take a few seconds)');
   try {
-    const glWb = await readWorkbook(state.files.gl);
-    const glRows = parseGl(glWb);
+    const glRows = await readGlRows(state.files.gl, (share, count) => {
+      setBuildStatus(`Reading GL Transaction Summary... ${Math.round(share * 100)}% (${count.toLocaleString('en-US')} lines)`);
+    });
     state.glRows = glRows;
     state.manualOptions = buildManualOptions(glRows);
     const boards = [];
