@@ -2492,8 +2492,8 @@ return (o > 0 ? '+' : '-') + '$' + Math.round(Math.abs(o) / 1000) + 'K';
 options: {
 responsive: true, maintainAspectRatio: false, layout: { padding: { top: 44 } },
 scales: {
-x: { stacked: true, grid: { display: false }, ticks: { font: { size: 9.5 }, color: '#64748b', autoSkip: false, maxRotation: 20 } },
-y: { stacked: true, min: yMin, max: yMax, grid: { color: '#f1f5f9' }, ticks: { font: { size: 9 }, color: '#64748b', callback: function(v) { return '$' + (v/1000).toFixed(0) + 'K'; } } }
+x: { stacked: true, grid: { display: false }, ticks: { font: { size: 12, weight: '600' }, color: '#475569', autoSkip: false, maxRotation: 20 } },
+y: { stacked: true, min: yMin, max: yMax, grid: { color: '#f1f5f9' }, ticks: { font: { size: 11.5 }, color: '#64748b', callback: function(v) { return '$' + (v/1000).toFixed(0) + 'K'; } } }
 },
 plugins: { legend: { display: false }, tooltip: { enabled: false } }
 }
@@ -2516,10 +2516,10 @@ datasets: [
 ]
 },
 options: {
-responsive: true, maintainAspectRatio: false,
+responsive: true, maintainAspectRatio: false, layout: { padding: { left: 6, right: 18 } },
 scales: {
-x: { grid: { display: false }, ticks: { font: { size: 10 }, color: '#64748b' } },
-y: { min, max, grid: { color: '#f1f5f9' }, ticks: { font: { size: 9 }, color: '#64748b', callback: function(v) { return '$' + (v/1000).toFixed(0) + 'K'; } } }
+x: { grid: { display: false }, ticks: { font: { size: 12, weight: '600' }, color: '#475569' } },
+y: { min, max, grid: { color: '#f1f5f9' }, ticks: { font: { size: 11.5 }, color: '#64748b', callback: function(v) { return '$' + (v/1000).toFixed(0) + 'K'; } } }
 },
 plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(c) { return c.dataset.label + ': $' + Math.round(c.raw/1000) + 'K'; } } } }
 }
