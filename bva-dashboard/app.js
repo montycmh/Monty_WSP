@@ -1577,13 +1577,38 @@ if(link) link.replaceWith(styleTag);
 else { const head = clone.querySelector('head'); if(head) head.appendChild(styleTag); }
 }
 function freezeCanvasesAsImages(clone){
+// Charts become images in exported boards / the Board Package. They are redrawn at a fixed width
+// before the snapshot, so the text keeps its size no matter how wide the window was when the boards
+// were generated (a wide window used to produce a very wide image that shrank to "miniature").
+const SNAP_W = 1300;
 document.querySelectorAll('canvas[id]').forEach(liveCanvas => {
-let dataUrl;
+let dataUrl = null;
+const chart = (window.Chart && typeof Chart.getChart === 'function') ? Chart.getChart(liveCanvas) : null;
+const h = liveCanvas.clientHeight;
+if(chart && h > 0){
+// Redraw the same chart off-screen at SNAP_W x current height (2x for sharp text).
+let host = null, tmp = null;
+try{
+host = document.createElement('div');
+host.style.cssText = `position:fixed;left:-20000px;top:0;width:${SNAP_W}px;height:${h}px;pointer-events:none;`;
+const c = document.createElement('canvas');
+host.appendChild(c); document.body.appendChild(host);
+const cfg = chart.config;
+const data = { labels:(cfg.data.labels || []).slice(), datasets:(cfg.data.datasets || []).map(ds => Object.assign({}, ds, { data:(ds.data || []).slice() })) };
+const options = Object.assign({}, cfg.options, { animation:false, responsive:false, maintainAspectRatio:false, devicePixelRatio:2 });
+c.width = SNAP_W; c.height = h; c.style.width = SNAP_W + 'px'; c.style.height = h + 'px';
+tmp = new Chart(c, { type:cfg.type, data, options, plugins:cfg.plugins || [] });
+dataUrl = c.toDataURL('image/png');
+}catch(e){ console.warn('Fixed-size chart snapshot failed for ' + liveCanvas.id + '; using the live canvas.', e); dataUrl = null; }
+finally{ try{ if(tmp) tmp.destroy(); }catch(e){} if(host) host.remove(); }
+}
+if(!dataUrl){
 try{
 dataUrl = liveCanvas.toDataURL('image/png');
 }catch(e){
 console.warn('Could not snapshot canvas ' + liveCanvas.id, e);
 return;
+}
 }
 const cloneCanvas = clone.querySelector('#' + liveCanvas.id);
 if(!cloneCanvas) return;
