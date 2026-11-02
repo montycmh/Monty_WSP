@@ -38,11 +38,36 @@
     setTimeout(function () { window.top.location.replace(link.href); }, 250);
   };
 
+  /* Back to the workspace the module was opened from. The Launchpad opens
+     modules with ?ws=<workspace>; the back button then returns to
+     <Launchpad>?workspace=<workspace>. Without ws it keeps the plain link
+     (the Launchpad then opens the user's default / last workspace). */
+  function applyReturnWorkspace(ws) {
+    ws = String(ws || '').trim().toLowerCase();
+    if (!/^[a-z0-9&_\- ]{1,40}$/.test(ws)) return;
+    Array.prototype.forEach.call(document.querySelectorAll('a.back-link, a.lp-back'), function (a) {
+      var href = a.getAttribute('href') || '';
+      if (!/\/exec(?:$|[?#])/.test(href) || /[?&]workspace=/.test(href)) return;
+      a.setAttribute('href', href + (href.indexOf('?') === -1 ? '?' : '&') + 'workspace=' + encodeURIComponent(ws));
+    });
+  }
+  function readReturnWorkspace() {
+    var ws = '';
+    try { ws = new URLSearchParams(window.location.search).get('ws') || ''; } catch (e) {}
+    if (ws) { applyReturnWorkspace(ws); return; }
+    try {
+      if (window.google && google.script && google.script.url && google.script.url.getLocation) {
+        google.script.url.getLocation(function (loc) { applyReturnWorkspace(loc && loc.parameter && loc.parameter.ws); });
+      }
+    } catch (e) {}
+  }
+
   function init() {
     var toggle = document.getElementById('lp-theme-toggle');
     if (toggle) toggle.addEventListener('click', function () { setTheme(!isDark()); });
     setTheme(isDark());
     Array.prototype.forEach.call(document.querySelectorAll('[data-lp-fx]'), function (el) { startHeroFx(el); });
+    readReturnWorkspace();
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();
