@@ -5,10 +5,13 @@
    - Fully self-contained: app.js serializes this function with
      toString() into every exported board, so it must not reference
      anything outside its own body (DOM APIs only).
+   - Driver cards get a Felipe button that drafts the variance comment
+     (click = without amounts, Shift+click = with amounts).
    ============================================================ */
 function initAnalystBot(DATA){
   var d = document;
   ['fpa-bot-root','fpa-bot-style'].forEach(function(id){ var e = d.getElementById(id); if(e && e.parentNode) e.parentNode.removeChild(e); });
+  d.querySelectorAll('.fb-draft').forEach(function(b){ if(b.parentNode) b.parentNode.removeChild(b); });
   if(!DATA || !DATA.rows || !DATA.rows.length) return null;
 
   /* ---------------- meta & periods ---------------- */
@@ -1029,6 +1032,121 @@ function initAnalystBot(DATA){
     return { html:h, chips:chipsFor(['No Vendor line items' + (g.cat ? ' ' + g.cat : ''), 'Where are the savings parked?', 'Real vs projected full year']) };
   }
 
+  /* ---------------- Felipe comment drafts (driver cards) ---------------- */
+  var SEC_VIEW = {
+    'sec-qplan':{ P:{ t:'q', i:RQ }, bk:'p' }, 'sec-qfcst':{ P:{ t:'q', i:RQ }, bk:'f' },
+    'sec-fyplan':{ P:{ t:'fy' }, bk:'p' }, 'sec-fyfcst':{ P:{ t:'fy' }, bk:'f' }
+  };
+  function joinAnd(a){ a = a.filter(Boolean); return a.length <= 1 ? (a[0] || '') : a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1]; }
+  // "Velocity Global, LLC DBA Pebl" -> "Velocity Global"; "Salaries - Exempt" -> "Exempt Salaries"
+  function cleanName(s){
+    s = String(s || '').replace(/^[^:]{2,40}\s:\s*/, '');
+    s = s.split(/\s+dba\s+/i)[0];
+    for(var k = 0; k < 3; k++) s = s.replace(/,?\s+(inc|llc|l\.l\.c|ltd|limited|corp|co)\.?\s*$/i, '');
+    var m = s.match(/^(Salaries|Payroll Taxes)\s+-\s+(.+)$/i);
+    if(m) s = m[2] + ' ' + m[1];
+    return s.replace(/\s+-\s+/g, ' ').replace(/[,\s]+$/, '').trim();
+  }
+  // Variance items of a category: one per vendor; No Vendor split into its line items when the NV feed is loaded.
+  function draftItems(E, P, bk){
+    var items = [], ms = monthsOf(P), cb = isCB(E), byKey = {}, order = [];
+    VROWS.forEach(function(x){
+      if(x.cat !== E) return;
+      var nov = x.vendor.nov, key = nov ? 'nv:' + x.gl.code : 'v:' + x.vendor.key;
+      if(!byKey[key]){ byKey[key] = { nov:nov, gl:x.gl, name:nov ? x.gl.name : x.vendor.name, rows:[] }; order.push(key); }
+      byKey[key].rows.push(x.row);
+    });
+    order.forEach(function(k){
+      var g = byKey[k], x = withB(sumVals(g.rows, P), bk);
+      if(Math.abs(x.v) < 1) return;
+      var ng = g.nov && !cb ? nvG(g.gl.code) : null;
+      if(ng){
+        var o = nvSplit(ng, ms, bk), used = 0;
+        o.rows.forEach(function(r){ items.push({ name:cleanName(r.it.d), w:r.w, b:r.b, v:r.v, line:true }); used += r.v; });
+        if(o.closed.length && Math.abs(o.cW - o.cB) >= 1){
+          var pl = o.plan.slice(0, 2).map(function(r){ return cleanName(r.it.d); });
+          items.push({ name:pl.length ? joinAnd(pl) : cleanName(g.gl.name), w:o.cW, b:o.cB, v:o.cW - o.cB, line:true });
+          used += o.cW - o.cB;
+        }
+        var rest = x.v - used;
+        if(Math.abs(rest) >= 1) items.push({ name:cleanName(g.gl.name), w:0, b:0, v:rest, generic:true });
+        return;
+      }
+      items.push({ name:cleanName(g.name), w:x.w, b:x.b, v:x.v, nov:g.nov });
+    });
+    return items;
+  }
+  // Same rules used by hand: unused / unplanned / savings reallocated / transfer to cover / higher-lower.
+  function draftPhrase(it, E){
+    var n = it.name, noW = Math.abs(it.w) < 1, noB = Math.abs(it.b) < 1, sfx = it.nov || it.line ? '' : ' spend';
+    var m = n.match(/to cover\s+(\w+)/i);
+    if(m) return 'savings transferred to cover ' + m[1] + ' overspend';
+    if(/saving|buffer|allocation/i.test(n)){
+      if(it.v > 0) return n + ' reallocated to ' + E.name + ' to maintain full-year budget';
+      return (noW ? 'unused ' : 'lower ') + n;
+    }
+    if(it.generic) return (it.v > 0 ? 'higher ' : 'lower ') + n;
+    if(noB && it.w > 0) return 'unplanned ' + n + sfx;
+    if(noW && it.b > 0) return 'unused ' + n + ' budget';
+    if(it.w < 0) return n + ' credit/reversal';
+    return (it.v > 0 ? 'higher ' : 'lower ') + n + sfx;
+  }
+  function draftComment(E, P, bk, withAmt){
+    var x = ev(E, P, bk), bn = bName(bk);
+    if(Math.abs(x.v) < 1) return 'In line with ' + bn + '.';
+    var sign = x.v > 0 ? 1 : -1, tot = Math.abs(x.v), minD = Math.max(1000, tot * 0.1);
+    var items = draftItems(E, P, bk).sort(function(a, b){ return Math.abs(b.v) - Math.abs(a.v); });
+    var off = items.filter(function(it){ return it.v * sign < 0 && Math.abs(it.v) >= minD; }).slice(0, 3);
+    var offTot = off.reduce(function(s, it){ return s + Math.abs(it.v); }, 0);
+    var same = items.filter(function(it){ return it.v * sign > 0; }), main = [], acc = 0;
+    same.forEach(function(it){
+      if(main.length >= 3) return;
+      if(main.length && (Math.abs(it.v) < minD || acc >= (tot + offTot) * 0.85)) return;
+      main.push(it); acc += Math.abs(it.v);
+    });
+    // Comp & Benefits: tie Payroll Taxes / 401K to the salary driver ("and related ...").
+    if(isCB(E)){
+      var sal = main.filter(function(it){ return /salar/i.test(it.name); })[0];
+      if(sal){
+        sal.rel = same.filter(function(it){ return it !== sal && /payroll tax|401k|fica|medicare|social security/i.test(it.name); });
+        main = main.filter(function(it){ return sal.rel.indexOf(it) < 0; });
+        var extra = same.filter(function(it){ return main.indexOf(it) < 0 && sal.rel.indexOf(it) < 0 && Math.abs(it.v) >= minD; });
+        while(main.length < 3 && extra.length) main.push(extra.shift());
+      }
+    }
+    function sumV(l){ return l.reduce(function(s, it){ return s + it.v; }, 0); }
+    function ph(it){
+      var s = draftPhrase(it, E) + (withAmt ? ' (' + fv(it.v) + ')' : '');
+      if(it.rel && it.rel.length) s += ' and related ' + joinAnd(it.rel.map(function(r){ return r.name; })) + (withAmt ? ' (' + fv(sumV(it.rel)) + ')' : '');
+      return s;
+    }
+    var s = (sign < 0 ? 'Favorable' : 'Unfavorable') + ' vs. ' + bn + (withAmt ? ' (' + fv(x.v) + ')' : '');
+    if(main.length) s += ' mainly driven by ' + joinAnd(main.map(ph));
+    if(off.length) s += ', partially offset by ' + joinAnd(off.map(ph));
+    s += '.';
+    // Full year: savings kept (not pushed) while the BU total sits on budget -> they cover other overspends.
+    if(P.t === 'fy' && sign < 0 && Math.abs(ev(TOTAL, P, bk).v) < thrOf(P)){
+      var over = CATS.filter(function(c){ return c !== E && ev(c, P, bk).v >= thrOf(P, 0.4); }).map(function(c){ return c.name; });
+      if(over.length) s += ' Remaining savings were retained to cover overspend in ' + joinAnd(over) + '.';
+    }
+    if(withAmt){
+      var shown = sumV(main) + sumV(off);
+      main.forEach(function(it){ if(it.rel) shown += sumV(it.rel); });
+      var rem = x.v - shown;
+      if(Math.abs(rem) >= Math.max(1000, tot * 0.05)) s += ' The remaining variance (' + fv(rem) + ') reflects smaller variances below materiality.';
+    }
+    return s;
+  }
+  // Which category / period / benchmark a driver card belongs to.
+  function draftCard(blk){
+    var sec = blk.closest('section'), view = SEC_VIEW[sec ? sec.id : ''];
+    var lab = blk.querySelector('.drv-label');
+    if(!view || !lab) return null;
+    var nm = norm(lab.textContent.trim());
+    var E = CATS.filter(function(c){ return norm(c.name) === nm || norm(c.label) === nm; })[0];
+    return E ? { E:E, P:view.P, bk:view.bk } : null;
+  }
+
   /* ---------------- router ---------------- */
   var CTX = null;
   var FOLLOWABLE = { entity:1, top:1, total:1, unplanned:1, unused:1, util:1, trend:1, buffer:1, compare:1, nv:1 };
@@ -1454,7 +1572,9 @@ function initAnalystBot(DATA){
     + '.fb-mbtn.fb-mb-sec{border:1px solid #cbd5e1;background:#fff;color:#334155}.fb-mbtn.fb-mb-sec:hover{background:#f1f5f9}'
     + '.fb-mbtn.fb-mb-pri{border:1px solid transparent;background:linear-gradient(90deg,#4f46e5,#6366f1);color:#fff}'
     + '.toast{right:auto!important;left:50%;transform:translate(-50%,10px)!important}.toast.show{transform:translate(-50%,0)!important}'
-    + '@media print{#fpa-bot-root{display:none!important}}';
+    + '.fb-draft{position:absolute;right:10px;bottom:10px;width:30px;height:30px;border:none;border-radius:9px;background:linear-gradient(120deg,#1e2450,#312e81);display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;z-index:2;box-shadow:0 3px 10px rgba(49,46,129,.25);transition:transform .15s}'
+    + '.fb-draft:hover{transform:translateY(-1px)}.fb-draft .fb-face{width:22px;height:22px}'
+    + '@media print{#fpa-bot-root,.fb-draft{display:none!important}}';
   var st = d.createElement('style'); st.id = 'fpa-bot-style'; st.textContent = CSS; (d.head || d.documentElement).appendChild(st);
 
   var FACE = '<svg class="fb-face" viewBox="0 0 32 32" aria-hidden="true"><line x1="16" y1="3.5" x2="16" y2="7.5" stroke="#c7d2fe" stroke-width="1.6" stroke-linecap="round"/><circle class="fb-ant" cx="16" cy="3" r="2" fill="#a5f3fc"/><rect x="5" y="7.5" width="22" height="19" rx="7" fill="#eef2ff"/><rect x="2.6" y="14" width="2.6" height="6" rx="1.3" fill="#c7d2fe"/><rect class="fb-ear-r" x="26.8" y="14" width="2.6" height="6" rx="1.3" fill="#c7d2fe"/><g class="fb-eyes"><ellipse cx="12" cy="15.5" rx="2.2" ry="2.6" fill="#312e81"/><ellipse cx="20" cy="15.5" rx="2.2" ry="2.6" fill="#312e81"/><circle cx="12.8" cy="14.6" r=".7" fill="#fff"/><circle cx="20.8" cy="14.6" r=".7" fill="#fff"/></g><circle cx="9.4" cy="20.2" r="1.5" fill="#fda4af" opacity=".75"/><circle cx="22.6" cy="20.2" r="1.5" fill="#fda4af" opacity=".75"/><path class="fb-smile" d="M12 20.6 Q16 24.6 20 20.6" fill="none" stroke="#312e81" stroke-width="1.8" stroke-linecap="round"/><g class="fb-eyes-c" fill="none" stroke="#312e81" stroke-width="1.7" stroke-linecap="round"><path d="M9.8 16.4 Q12 13.9 14.2 16.4"/><path d="M17.8 16.4 Q20 13.9 22.2 16.4"/></g><g class="fb-hand"><rect x="29.4" y="15.2" width="3.4" height="9" rx="1.7" fill="#c7d2fe" stroke="#312e81" stroke-width=".7"/><rect x="24.6" y="10.6" width="6" height="2.6" rx="1.3" fill="#fef3c7" stroke="#312e81" stroke-width=".7" transform="rotate(28 30.6 11.9)"/><circle cx="31.1" cy="14.4" r="3.4" fill="#fef3c7" stroke="#312e81" stroke-width=".7"/><path d="M29.6 15.6 Q31.1 16.6 32.6 15.6" fill="none" stroke="#312e81" stroke-width=".55" stroke-linecap="round"/></g><g class="fb-wave"><rect x="28.9" y="9" width="3.4" height="12.5" rx="1.7" fill="#c7d2fe" stroke="#312e81" stroke-width=".7" transform="rotate(14 30.6 21.5)"/><path d="M29.2 4.6 L28.7 1.4 M31.3 3.9 L31.3 0.4 M33.4 4.6 L34 1.4 M28.2 7.6 L26.3 6.4" stroke="#312e81" stroke-width="1.5" stroke-linecap="round"/><path d="M29.2 4.6 L28.7 1.4 M31.3 3.9 L31.3 0.4 M33.4 4.6 L34 1.4 M28.2 7.6 L26.3 6.4" stroke="#fef3c7" stroke-width=".7" stroke-linecap="round"/><circle cx="31.3" cy="7.2" r="3.7" fill="#fef3c7" stroke="#312e81" stroke-width=".7"/></g></svg>';
@@ -1606,7 +1726,41 @@ function initAnalystBot(DATA){
   root.querySelector('.fb-ctx-btn').addEventListener('click', showMenu);
   panel.addEventListener('keydown', function(e){ if(e.key === 'Escape'){ if(!modal.hidden) closeModal(); else close(); } });
 
-  var api = { ask:answer, open:open, close:close, clear:clearChat, section:enterSection, menu:showMenu };
+  /* ---------------- Felipe button on driver cards ---------------- */
+  // Click: draft without amounts. Shift+click: draft with amounts.
+  // The draft goes in as a new comment row (same as "Add comment row"), so it is editable, saved and deletable.
+  function draftOf(blk, withAmt){ var i = draftCard(blk); return i ? draftComment(i.E, i.P, i.bk, !!withAmt) : null; }
+  function draftInto(blk, btn, withAmt){
+    if(btn.classList.contains('fb-thinking')) return;
+    var txt;
+    try{ txt = draftOf(blk, withAmt); }catch(err){ if(window.console) console.warn('Felipe draft error', err); return; }
+    var inp = blk.querySelector('.add-comment-input'), add = blk.querySelector('[data-add-comment]');
+    if(!txt || !inp) return;
+    btn.classList.add('fb-thinking');
+    setTimeout(function(){
+      btn.classList.remove('fb-thinking');
+      inp.value = txt; inp.textContent = txt;
+      if(add) add.click();
+      var rows = blk.querySelectorAll('.comment-row textarea'), ta = rows[rows.length - 1];
+      if(ta){ ta.focus(); try{ ta.setSelectionRange(ta.value.length, ta.value.length); }catch(e){} }
+    }, 650);
+  }
+  d.querySelectorAll('.drv-block').forEach(function(blk){
+    var left = blk.querySelector('.drv-left');
+    // Only on editable boards (static exports drop the add-comment button) and on cards Felipe can read.
+    if(!left || !blk.querySelector('[data-add-comment]') || !draftCard(blk)) return;
+    if(window.getComputedStyle(left).position === 'static') left.style.position = 'relative';
+    var b = d.createElement('button');
+    b.type = 'button'; b.className = 'fb-draft';
+    b.title = 'Felipe: draft the variance comment (Shift+click to include amounts)';
+    b.setAttribute('aria-label', 'Draft comment with Felipe');
+    b.setAttribute('data-html2canvas-ignore', 'true');   // kept out of the PDF export
+    b.innerHTML = FACE;
+    b.addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); draftInto(blk, b, e.shiftKey); });
+    left.appendChild(b);
+  });
+
+  var api = { ask:answer, open:open, close:close, clear:clearChat, section:enterSection, menu:showMenu, draft:draftOf };
   try{ window.__fpaBot = api; }catch(e){}
   return api;
 }
