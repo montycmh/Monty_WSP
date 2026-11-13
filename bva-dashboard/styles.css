@@ -632,14 +632,24 @@ td{font-variant-numeric:tabular-nums}
 .trend-wrap.pro-svg{padding:14px 16px 8px}
 .wf-wrap.pro-svg{padding:14px 16px 6px}
 
-/* ---- Felipe "draft comment" button on driver cards (navy + mint) ---- */
-.drv-left .fb-draft{
-  width:32px;height:32px;border-radius:10px;
-  background:linear-gradient(120deg,#141a45 0%,#1e2761 60%,#2a3580 100%);
-  box-shadow:inset 0 0 0 1px rgba(159,225,203,.25),0 6px 14px -6px rgba(15,21,48,.45);
+/* ---- Felipe "draft comment" button on driver cards ----
+   Same behavior as the trash icon: greyed out and almost hidden,
+   shows when hovering the card, lights up in color when hovering Felipe. */
+.drv-block .drv-left .fb-draft{
+  width:26px;height:26px;border-radius:6px;padding:2px;
+  background:transparent;box-shadow:none;
+  opacity:.15;filter:grayscale(1);
+  transition:opacity .15s,filter .15s,background .15s;
 }
-.drv-left .fb-draft:hover{
-  box-shadow:inset 0 0 0 1px rgba(159,225,203,.7),0 8px 18px -6px rgba(15,21,48,.5);
+.drv-block:hover .drv-left .fb-draft{opacity:.55}
+.drv-block .drv-left .fb-draft:hover,
+.drv-block .drv-left .fb-draft.fb-thinking{
+  opacity:1;filter:none;transform:none;
+  background:#1e2761;
+  box-shadow:inset 0 0 0 1px rgba(159,225,203,.35);
 }
-.drv-left .fb-draft .fb-face{width:23px;height:23px}
+.drv-block .drv-left .fb-draft .fb-face{width:20px;height:20px}
+/* Felipe stays still while greyed out; he only moves when lit up */
+.drv-block .drv-left .fb-draft:not(:hover):not(.fb-thinking) .fb-face,
+.drv-block .drv-left .fb-draft:not(:hover):not(.fb-thinking) .fb-face *{animation:none}
 @media print{.fb-draft{display:none!important}}
