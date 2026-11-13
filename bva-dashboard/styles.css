@@ -631,3 +631,15 @@ td{font-variant-numeric:tabular-nums}
 .stacked-th .th-bottom{font-size:10.5px;font-weight:500}
 .trend-wrap.pro-svg{padding:14px 16px 8px}
 .wf-wrap.pro-svg{padding:14px 16px 6px}
+
+/* ---- Felipe "draft comment" button on driver cards (navy + mint) ---- */
+.drv-left .fb-draft{
+  width:32px;height:32px;border-radius:10px;
+  background:linear-gradient(120deg,#141a45 0%,#1e2761 60%,#2a3580 100%);
+  box-shadow:inset 0 0 0 1px rgba(159,225,203,.25),0 6px 14px -6px rgba(15,21,48,.45);
+}
+.drv-left .fb-draft:hover{
+  box-shadow:inset 0 0 0 1px rgba(159,225,203,.7),0 8px 18px -6px rgba(15,21,48,.5);
+}
+.drv-left .fb-draft .fb-face{width:23px;height:23px}
+@media print{.fb-draft{display:none!important}}
